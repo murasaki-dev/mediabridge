@@ -63,7 +63,7 @@
       <label for="preferred-language">Preferred subtitle language</label>
       <input id="preferred-language" type="text" placeholder="For example: en" autocomplete="off">
       <label for="cookies-browser">YouTube cookies for local mpv</label>
-      <select id="cookies-browser"><option value="auto">System default browser (automatic)</option><option value="chrome">Google Chrome</option><option value="chromium">Chromium</option><option value="edge">Microsoft Edge</option><option value="firefox">Firefox</option><option value="brave">Brave</option><option value="opera">Opera</option><option value="vivaldi">Vivaldi</option><option value="whale">Whale</option><option value="off">Off</option></select>
+      <select id="cookies-browser"><option value="auto">System default browser (automatic)</option><option value="librewolf">MediaBridge LibreWolf</option><option value="chrome">Google Chrome</option><option value="chromium">Chromium</option><option value="edge">Microsoft Edge</option><option value="firefox">Firefox</option><option value="brave">Brave</option><option value="opera">Opera</option><option value="vivaldi">Vivaldi</option><option value="whale">Whale</option><option value="off">Off</option></select>
       <label for="cookies-profile">Browser profile (optional)</label>
       <input id="cookies-profile" type="text" placeholder="Default, Profile 1, or Firefox profile name" autocomplete="off">
       <p class="muted">Uses the selected browser's local profile through yt-dlp. MediaBridge does not access your YouTube account through OAuth. On Windows, Chromium browsers can lock their cookie database while open; fully quit the browser and retry if the error says it could not copy the database. You can keep this dashboard open on another device while doing that. A DPAPI decryption error is different and will not be fixed by closing the browser; try a Firefox profile signed into YouTube or another supported cookie source.</p>
@@ -86,7 +86,7 @@
       <div><label for="mode">Playback</label><select id="mode"><option value="local">Direct player (mpv + yt-dlp)</option><option value="browser">Web browser</option></select></div>
       <div id="quality-wrap"><label for="quality">Maximum quality</label><select id="quality"><option value="best">Best available</option><option>480</option><option>720</option><option>1080</option><option>1440</option><option>2160</option></select></div>
       <div id="screen-wrap"><label for="screen">mpv display index</label><input id="screen" type="number" min="0" max="32" step="1" placeholder="Default" style="width:110px"><small class="muted">Optional, starts at 0</small></div>
-      <div id="browser-wrap" class="hidden"><label for="browser">Browser</label><select id="browser"><option value="chromium">Chromium</option><option value="firefox">Firefox</option><option value="">System default</option></select></div>
+      <div id="browser-wrap" class="hidden"><label for="browser">Browser</label><select id="browser"><option value="chromium">Chromium</option><option value="firefox">Firefox</option><option value="librewolf">MediaBridge LibreWolf</option><option value="">System default</option></select></div>
     </div>
     <label style="display:flex;gap:8px;align-items:center;margin-top:10px"><input id="subtitles" type="checkbox"> Load subtitles (slower)</label>
     <div class="row" style="margin-top:14px">
@@ -123,6 +123,7 @@
   const $ = id => document.getElementById(id);
   const message = text => { $('message').textContent = text || ''; };
   const mode = $('mode');
+  let isLinuxPlatform = false;
   function setSettingsOpen(open) {
     document.body.classList.toggle('settings-open', open);
     $('settings-backdrop').classList.toggle('hidden', !open);
@@ -211,8 +212,11 @@
     $('default-quality').value = preferences.default_quality ?? '';
     $('default-subtitles').checked = !!preferences.subtitles;
     $('preferred-language').value = preferences.preferred_language ?? '';
-    $('cookies-browser').value = preferences.cookies_browser || 'auto';
-    $('cookies-profile').value = preferences.cookies_profile ?? '';
+    const cookieBrowser = preferences.cookies_browser || 'auto';
+    $('cookies-browser').value = isLinuxPlatform
+      ? (cookieBrowser === 'off' ? 'off' : 'librewolf')
+      : cookieBrowser;
+    $('cookies-profile').value = isLinuxPlatform ? '' : (preferences.cookies_profile ?? '');
     $('screen').value = preferences.default_screen ?? '';
     $('quality').value = preferences.default_quality || 'best';
     $('subtitles').checked = !!preferences.subtitles;
@@ -221,6 +225,28 @@
     try {
       const response = await fetch('/preferences', {cache:'no-store'}), preferences = await response.json();
       if (response.ok) applyPreferences(preferences);
+    } catch (_) {}
+  }
+  async function configurePlatform() {
+    try {
+      const response = await fetch('/platform', {cache:'no-store'}), platform = await response.json();
+      if (platform.os !== 'linux') {
+        $('cookies-browser').querySelector('option[value="librewolf"]')?.remove();
+        $('browser').querySelector('option[value="librewolf"]')?.remove();
+        return;
+      }
+      isLinuxPlatform = true;
+      const cookieBrowser = $('cookies-browser');
+      [...cookieBrowser.options].forEach(option => { if (!['librewolf', 'off'].includes(option.value)) option.remove(); });
+      cookieBrowser.value = 'librewolf';
+      $('cookies-profile').disabled = true;
+      $('cookies-profile').placeholder = 'Uses the managed persistent profile';
+      $('cookies-profile').value = '';
+      const cookieHelp = $('cookies-profile').nextElementSibling;
+      if (cookieHelp?.classList.contains('muted')) cookieHelp.textContent = 'Uses the persistent MediaBridge LibreWolf profile with uBlock Origin. Sign in to YouTube once in this browser; cookies are kept when it closes.';
+      const browser = $('browser');
+      browser.replaceChildren(new Option('MediaBridge LibreWolf', 'librewolf'));
+      browser.value = 'librewolf';
     } catch (_) {}
   }
   $('save-playback-preferences').onclick = async () => {
@@ -275,7 +301,7 @@
       }, 1200);
     } catch (error) { $('server-port-status').textContent = error.message; button.disabled = false; }
   };
-  loadPreferences();
+  configurePlatform().then(loadPreferences);
   function itemFromForm() {
     const url = cleanLink($('url').value);
     const smb = /^smb:\/\//i.test(url);

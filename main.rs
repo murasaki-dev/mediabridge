@@ -37,6 +37,15 @@ macro_rules! eprintln {
     ($($arg:tt)*) => {{ crate::append_windows_log(format!($($arg)*)); }};
 }
 
+#[cfg(target_os = "linux")]
+macro_rules! println {
+    ($($arg:tt)*) => {{ crate::append_linux_log(format!($($arg)*)); }};
+}
+#[cfg(target_os = "linux")]
+macro_rules! eprintln {
+    ($($arg:tt)*) => {{ crate::append_linux_log(format!($($arg)*)); }};
+}
+
 #[cfg(windows)]
 fn windows_log_path() -> PathBuf {
     env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(env::temp_dir)
@@ -60,6 +69,38 @@ fn append_windows_log(message: String) {
 fn initialize_windows_log() {
     use std::fs::{self, OpenOptions};
     let path = windows_log_path();
+    if let Some(parent) = path.parent() { let _ = fs::create_dir_all(parent); }
+    let _ = OpenOptions::new().create(true).append(true).open(path);
+}
+
+#[cfg(target_os = "linux")]
+fn linux_log_path() -> PathBuf {
+    env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))
+        .unwrap_or_else(env::temp_dir)
+        .join("mediabridge")
+        .join("mediabridge.log")
+}
+
+#[cfg(target_os = "linux")]
+fn append_linux_log(message: String) {
+    use std::fs::{self, OpenOptions};
+    use std::io::Write as _;
+    let path = linux_log_path();
+    if let Some(parent) = path.parent() { let _ = fs::create_dir_all(parent); }
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs()).unwrap_or_default();
+        let _ = writeln!(file, "[{timestamp}] {message}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn initialize_linux_log() {
+    use std::fs::{self, OpenOptions};
+    let path = linux_log_path();
     if let Some(parent) = path.parent() { let _ = fs::create_dir_all(parent); }
     let _ = OpenOptions::new().create(true).append(true).open(path);
 }
@@ -101,7 +142,7 @@ impl Default for UserConfig {
             default_quality: None,
             subtitles: false,
             preferred_language: None,
-            cookies_browser: "auto".into(),
+            cookies_browser: if cfg!(target_os = "linux") { "librewolf" } else { "auto" }.into(),
             cookies_profile: None,
         }
     }
@@ -121,16 +162,56 @@ static REMOTE_ORIGINS: OnceLock<RwLock<Vec<String>>> = OnceLock::new();
 static PLAYBACK_PREFERENCES: OnceLock<RwLock<PlaybackPreferences>> = OnceLock::new();
 
 fn user_config_path() -> Result<PathBuf, String> {
-    let executable = env::current_exe().map_err(|e| format!("could not locate MediaBridge executable: {e}"))?;
-    let directory = executable.parent().ok_or("MediaBridge executable has no parent directory")?;
-    Ok(directory.join("mediabridge.json"))
+    #[cfg(target_os = "linux")]
+    {
+        let config_home = env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|path| path.is_absolute())
+            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+            .ok_or("could not locate the user's configuration directory")?;
+        return Ok(config_home.join("mediabridge").join("mediabridge.json"));
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let executable = env::current_exe()
+            .map_err(|e| format!("could not locate MediaBridge executable: {e}"))?;
+        let directory = executable
+            .parent()
+            .ok_or("MediaBridge executable has no parent directory")?;
+        Ok(directory.join("mediabridge.json"))
+    }
 }
 
 fn load_user_config() -> Result<UserConfig, String> {
     let path = user_config_path()?;
     if !path.exists() {
+        #[cfg(target_os = "linux")]
+        {
+            // Migrate settings created by the previous executable-directory layout.
+            let legacy = env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(|dir| dir.join("mediabridge.json")));
+            if let Some(legacy) = legacy.filter(|legacy| legacy.is_file()) {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| {
+                        format!("could not create configuration directory {}: {e}", parent.display())
+                    })?;
+                }
+                std::fs::copy(&legacy, &path).map_err(|e| {
+                    format!("could not migrate configuration from {}: {e}", legacy.display())
+                })?;
+                println!("Migrated configuration from {} to {}", legacy.display(), path.display());
+            }
+        }
+    }
+    if !path.exists() {
         let defaults = UserConfig::default();
         let contents = serde_json::to_string_pretty(&defaults).map_err(|e| e.to_string())?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                format!("could not create configuration directory {}: {e}", parent.display())
+            })?;
+        }
         match std::fs::write(&path, format!("{contents}\n")) {
             Ok(()) => println!("Created configuration file at {}", path.display()),
             Err(error) => eprintln!("Could not create configuration file at {}: {error}", path.display()),
@@ -168,6 +249,11 @@ fn save_remote_origins(origins: Vec<String>) -> Result<Vec<String>, String> {
     let mut config = load_user_config()?;
     config.remote_origin_servers = origins.clone();
     let contents = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            format!("could not create configuration directory {}: {e}", parent.display())
+        })?;
+    }
     std::fs::write(&path, format!("{contents}\n"))
         .map_err(|e| format!("could not save configuration file {}: {e}", path.display()))?;
     if let Some(list) = REMOTE_ORIGINS.get() {
@@ -186,7 +272,7 @@ fn validate_preferences(preferences: &PlaybackPreferences) -> Result<(), String>
     if preferences.preferred_language.as_deref().is_some_and(|language| language.contains(',') || language.contains('\n') || language.contains('\r')) {
         return Err("preferred subtitle language must not contain commas or line breaks".into());
     }
-    if !matches!(preferences.cookies_browser.as_str(), "auto" | "off" | "chrome" | "chromium" | "edge" | "firefox" | "brave" | "opera" | "vivaldi" | "whale") {
+    if !matches!(preferences.cookies_browser.as_str(), "auto" | "off" | "librewolf" | "chrome" | "chromium" | "edge" | "firefox" | "brave" | "opera" | "vivaldi" | "whale") {
         return Err("cookie browser must be auto, off, or a browser supported by yt-dlp".into());
     }
     if preferences.cookies_profile.as_deref().is_some_and(|profile| profile.contains(',') || profile.contains('\n') || profile.contains('\r')) {
@@ -208,6 +294,11 @@ fn save_playback_preferences(preferences: PlaybackPreferences) -> Result<(), Str
     config.cookies_browser = preferences.cookies_browser.clone();
     config.cookies_profile = preferences.cookies_profile.clone();
     let contents = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            format!("could not create configuration directory {}: {e}", parent.display())
+        })?;
+    }
     std::fs::write(&path, format!("{contents}\n"))
         .map_err(|e| format!("could not save configuration file {}: {e}", path.display()))?;
     if let Some(live) = PLAYBACK_PREFERENCES.get() {
@@ -221,6 +312,11 @@ fn save_bind_address(bind: &str) -> Result<(), String> {
     let mut config = load_user_config()?;
     config.bind = bind.to_string();
     let contents = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            format!("could not create configuration directory {}: {e}", parent.display())
+        })?;
+    }
     std::fs::write(&path, format!("{contents}\n"))
         .map_err(|e| format!("could not save configuration file {}: {e}", path.display()))
 }
@@ -428,7 +524,7 @@ fn config() -> Result<Config, String> {
     if user.preferred_language.as_deref().is_some_and(|language| language.contains(',') || language.contains('\n') || language.contains('\r')) {
         return Err("preferred_language must not contain commas or line breaks".into());
     }
-    if !matches!(user.cookies_browser.as_str(), "auto" | "off" | "chrome" | "chromium" | "edge" | "firefox" | "brave" | "opera" | "vivaldi" | "whale") {
+    if !matches!(user.cookies_browser.as_str(), "auto" | "off" | "librewolf" | "chrome" | "chromium" | "edge" | "firefox" | "brave" | "opera" | "vivaldi" | "whale") {
         return Err("configuration cookies_browser must be auto, off, or a browser supported by yt-dlp".into());
     }
     if user.cookies_profile.as_deref().is_some_and(|profile| profile.contains(',') || profile.contains('\n') || profile.contains('\r')) {
@@ -464,30 +560,43 @@ fn config() -> Result<Config, String> {
 }
 
 fn detect_default_cookie_browser() -> Result<String, String> {
-    #[cfg(windows)]
-    let raw = Command::new("reg").args(["query", r"HKCU\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice", "/v", "ProgId"])
-        .output().map_err(|e| format!("could not inspect the Windows default browser: {e}"))?;
-    #[cfg(unix)]
-    let raw = Command::new("xdg-settings").args(["get", "default-web-browser"])
-        .output().map_err(|e| format!("could not inspect the Linux default browser (xdg-settings): {e}"))?;
-    if !raw.status.success() { return Err("could not determine the system default browser".into()); }
-    let detected = String::from_utf8_lossy(&raw.stdout).to_ascii_lowercase();
-    let browser = if detected.contains("firefox") { "firefox" }
-        else if detected.contains("edge") || detected.contains("msedge") { "edge" }
-        else if detected.contains("brave") { "brave" }
-        else if detected.contains("vivaldi") { "vivaldi" }
-        else if detected.contains("opera") { "opera" }
-        else if detected.contains("chromium") { "chromium" }
-        else if detected.contains("chrome") { "chrome" }
-        else if detected.contains("whale") { "whale" }
-        else { return Err(format!("the system default browser is not supported by yt-dlp: {}", detected.trim())); };
-    Ok(browser.to_string())
+    #[cfg(target_os = "linux")]
+    { return Ok("librewolf".into()); }
+    #[cfg(not(target_os = "linux"))]
+    {
+        #[cfg(windows)]
+        let raw = Command::new("reg").args(["query", r"HKCU\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice", "/v", "ProgId"])
+            .output().map_err(|e| format!("could not inspect the Windows default browser: {e}"))?;
+        #[cfg(all(unix, not(target_os = "linux")))]
+        let raw = Command::new("xdg-settings").args(["get", "default-web-browser"])
+            .output().map_err(|e| format!("could not inspect the system default browser (xdg-settings): {e}"))?;
+        if !raw.status.success() { return Err("could not determine the system default browser".into()); }
+        let detected = String::from_utf8_lossy(&raw.stdout).to_ascii_lowercase();
+        let browser = if detected.contains("firefox") { "firefox" }
+            else if detected.contains("edge") || detected.contains("msedge") { "edge" }
+            else if detected.contains("brave") { "brave" }
+            else if detected.contains("vivaldi") { "vivaldi" }
+            else if detected.contains("opera") { "opera" }
+            else if detected.contains("chromium") { "chromium" }
+            else if detected.contains("chrome") { "chrome" }
+            else if detected.contains("whale") { "whale" }
+            else { return Err(format!("the system default browser is not supported by yt-dlp: {}", detected.trim())); };
+        Ok(browser.to_string())
+    }
 }
 
 fn cookie_browser_spec(browser: &str, profile: Option<&str>) -> Result<Option<String>, String> {
     if browser == "off" { return Ok(None); }
     let resolved = if browser == "auto" { detect_default_cookie_browser()? } else { browser.to_string() };
     let profile = profile.map(str::trim).filter(|profile| !profile.is_empty());
+    #[cfg(target_os = "linux")]
+    if resolved == "librewolf" {
+        let profile = env::var_os("MEDIABRIDGE_LIBREWOLF_PROFILE").map(PathBuf::from)
+            .or_else(|| env::var_os("XDG_DATA_HOME").map(|home| PathBuf::from(home).join("mediabridge/librewolf-profile")))
+            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share/mediabridge/librewolf-profile")))
+            .ok_or("could not locate the MediaBridge LibreWolf profile")?;
+        return Ok(Some(format!("firefox:{}", profile.display())));
+    }
     Ok(Some(match profile { Some(profile) => format!("{resolved}:{profile}"), None => resolved }))
 }
 
@@ -654,7 +763,11 @@ fn check_cookie_access(browser: &str, profile: Option<&str>) -> Result<serde_jso
         .map_err(|e| format!("yt-dlp read cookies but could not confirm a YouTube video: {e}"))?;
     let title = metadata.get("title").and_then(|value| value.as_str()).unwrap_or("YouTube video");
     let account = youtube_account_from_cookies(&cookie_file).ok().flatten();
-    Ok(serde_json::json!({"ok": true, "browser": spec, "title": title,
+    #[cfg(target_os = "linux")]
+    let browser_label = if browser == "librewolf" || browser == "auto" { "MediaBridge LibreWolf".to_string() } else { spec.clone() };
+    #[cfg(not(target_os = "linux"))]
+    let browser_label = spec.clone();
+    Ok(serde_json::json!({"ok": true, "browser": browser_label, "title": title,
         "channel_name": account.as_ref().map(|account| account.0.as_str()),
         "channel_avatar_url": account.as_ref().and_then(|account| account.1.as_deref())}))
 }
@@ -710,6 +823,13 @@ fn browser_candidates(browser: &str) -> Vec<String> {
         .unwrap_or_else(|| browser.to_lowercase());
     if browser.contains('/') || browser.contains('\\') {
         return vec![browser.to_string()];
+    }
+    #[cfg(target_os = "linux")]
+    if executable == "librewolf" {
+        let launcher = env::var_os("MEDIABRIDGE_LIBREWOLF_LAUNCHER")
+            .map(PathBuf::from)
+            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/bin/mediabridge-librewolf")));
+        return launcher.into_iter().map(|path| path.to_string_lossy().into_owned()).collect();
     }
     let mut candidates = match executable.as_str() {
         "chromium" | "chromium-browser" => vec![browser.to_string(), "chromium".into(), "chromium-browser".into()],
@@ -1588,7 +1708,7 @@ fn start_url(state: &mut State, cfg: &Config, mut item: QueueItem) -> Result<(),
                     "--new-window".into(),
                     "--autoplay-policy=no-user-gesture-required".into(),
                 ],
-                "firefox" => vec!["--kiosk".into(), "--new-window".into()],
+                "firefox" | "librewolf" | "mediabridge-librewolf" => vec!["--kiosk".into(), "--new-window".into()],
                 _ => Vec::new(),
             }
         } else { Vec::new() };
@@ -1749,6 +1869,19 @@ fn open_url_default(url: &str) -> Result<Child, String> {
 fn open_url_default(url: &str) -> Result<Child, String> {
     Command::new("xdg-open").arg(url).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
         .spawn().map_err(|e| format!("could not open URL with xdg-open: {e}"))
+}
+
+#[cfg(target_os = "linux")]
+fn open_dashboard_in_librewolf(url: &str) -> Result<Child, String> {
+    let home = env::var_os("HOME").map(PathBuf::from)
+        .ok_or("could not locate the installed MediaBridge LibreWolf launcher")?;
+    let launcher = env::var_os("MEDIABRIDGE_LIBREWOLF_LAUNCHER")
+        .map(PathBuf::from).unwrap_or_else(|| home.join(".local/bin/mediabridge-librewolf"));
+    if !launcher.is_file() {
+        return Err(format!("MediaBridge LibreWolf launcher was not found at {}", launcher.display()));
+    }
+    Command::new(&launcher).arg(url).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+        .spawn().map_err(|error| format!("could not open dashboard in bundled LibreWolf: {error}"))
 }
 
 #[cfg(unix)]
@@ -2009,7 +2142,7 @@ fn browser_player(browser_arg: Option<&str>) -> Option<String> {
         .map(str::to_string).collect::<Vec<_>>();
     let prefixes: Vec<String> = if let Some(browser) = browser_arg {
         let name = Path::new(browser).file_name().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_else(|| browser.to_lowercase());
-        let canonical = match name.as_str() { "chromium-browser" => "chromium", "google-chrome-stable" => "google-chrome", _ => name.as_str() };
+        let canonical = match name.as_str() { "chromium-browser" => "chromium", "google-chrome-stable" => "google-chrome", "mediabridge-librewolf" => "firefox", _ => name.as_str() };
         vec![canonical.to_string()]
     } else { ["chromium", "google-chrome", "firefox", "brave", "vivaldi", "microsoft-edge", "min"].iter().map(|s| s.to_string()).collect() };
     players.into_iter().find(|player| {
@@ -2106,11 +2239,14 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
     if method == Method::Get && path == "/preferences" {
         respond(request, 200, json(&current_playback_preferences(cfg)), "application/json"); return;
     }
+    if method == Method::Get && path == "/platform" {
+        respond(request, 200, json(&serde_json::json!({"os": env::consts::OS})), "application/json"); return;
+    }
     if method == Method::Post && path == "/settings/cookies/check" {
         let mut body = String::new();
         if request.as_reader().read_to_string(&mut body).is_err() { respond(request, 400, "{\"error\":\"invalid body\"}".into(), "application/json"); return; }
         let parsed: CookieCheckRequest = match serde_json::from_str(&body) { Ok(value) => value, Err(error) => { respond(request, 400, json(&serde_json::json!({"error": error.to_string()})), "application/json"); return; } };
-        if !matches!(parsed.cookies_browser.as_str(), "auto" | "chrome" | "chromium" | "edge" | "firefox" | "brave" | "opera" | "vivaldi" | "whale") {
+        if !matches!(parsed.cookies_browser.as_str(), "auto" | "librewolf" | "chrome" | "chromium" | "edge" | "firefox" | "brave" | "opera" | "vivaldi" | "whale") {
             respond(request, 400, "{\"error\":\"choose a supported browser to check cookie access\"}".into(), "application/json"); return;
         }
         if parsed.cookies_profile.as_deref().is_some_and(|profile| profile.contains(',') || profile.contains('\n') || profile.contains('\r')) {
@@ -2524,7 +2660,7 @@ fn run_server(cfg: Config, shutdown: Option<Arc<AtomicBool>>) -> Result<Option<S
     Ok(restart_bind)
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 fn main() {
     let cfg = match config() { Ok(c) => c, Err(e) => { eprintln!("{e}"); std::process::exit(2); } };
     match run_server(cfg, None) {
@@ -2534,6 +2670,185 @@ fn main() {
         Ok(None) => {},
         Err(error) => { eprintln!("{error}"); std::process::exit(1); }
     }
+}
+
+#[cfg(target_os = "linux")]
+enum LinuxTrayEvent {
+    Menu(tray_icon::menu::MenuEvent),
+    Icon(tray_icon::TrayIconEvent),
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxTrayApp {
+    shutdown: Arc<AtomicBool>,
+    dashboard_url: String,
+    tray: Option<tray_icon::TrayIcon>,
+    dashboard_id: Option<tray_icon::menu::MenuId>,
+    logs_id: Option<tray_icon::menu::MenuId>,
+    quit_id: Option<tray_icon::menu::MenuId>,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxTrayApp {
+    fn open_dashboard(&self) {
+        if let Err(error) = open_dashboard_in_librewolf(&self.dashboard_url) {
+            append_linux_log(format!("Could not open dashboard in LibreWolf: {error}"));
+        }
+    }
+
+    fn open_logs(&self) {
+        if let Err(error) = Command::new("xdg-open").arg(linux_log_path()).spawn() {
+            append_linux_log(format!("Could not open the MediaBridge log file: {error}"));
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl winit::application::ApplicationHandler<LinuxTrayEvent> for LinuxTrayApp {
+    fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        if self.tray.is_some() { return; }
+        use tray_icon::menu::{Menu, MenuItem, PredefinedMenuItem};
+        use tray_icon::{Icon, TrayIconBuilder};
+        let menu = Menu::new();
+        let dashboard = MenuItem::new("Open Dashboard", true, None);
+        let logs = MenuItem::new("Show logs", true, None);
+        let quit = MenuItem::new("Quit MediaBridge", true, None);
+        self.dashboard_id = Some(dashboard.id().clone());
+        self.logs_id = Some(logs.id().clone());
+        self.quit_id = Some(quit.id().clone());
+        if let Err(error) = menu.append(&dashboard)
+            .and_then(|_| menu.append(&PredefinedMenuItem::separator()))
+            .and_then(|_| menu.append(&logs))
+            .and_then(|_| menu.append(&PredefinedMenuItem::separator()))
+            .and_then(|_| menu.append(&quit)) {
+            append_linux_log(format!("Could not create tray menu: {error}"));
+            event_loop.exit();
+            return;
+        }
+        let mut pixels = vec![0u8; 16 * 16 * 4];
+        for y in 2..14 {
+            for x in 2..14 {
+                let i = (y * 16 + x) * 4;
+                pixels[i..i + 4].copy_from_slice(&[35, 166, 223, 255]);
+            }
+        }
+        for (x, y) in [(6, 5), (7, 6), (8, 7), (9, 8), (8, 9), (7, 10), (6, 11)] {
+            let i = (y * 16 + x) * 4;
+            pixels[i..i + 4].copy_from_slice(&[255, 255, 255, 255]);
+        }
+        let icon = match Icon::from_rgba(pixels, 16, 16) {
+            Ok(icon) => icon,
+            Err(error) => {
+                append_linux_log(format!("Could not create tray icon image: {error}"));
+                event_loop.exit();
+                return;
+            }
+        };
+        match TrayIconBuilder::new().with_tooltip("MediaBridge")
+            .with_menu(Box::new(menu)).with_icon(icon).with_menu_on_left_click(false).build() {
+            Ok(tray) => self.tray = Some(tray),
+            Err(error) => {
+                append_linux_log(format!("Could not create Linux tray icon: {error}"));
+                event_loop.exit();
+            }
+        }
+    }
+
+    fn user_event(&mut self, event_loop: &winit::event_loop::ActiveEventLoop, event: LinuxTrayEvent) {
+        use tray_icon::{MouseButton, MouseButtonState, TrayIconEvent};
+        match event {
+            LinuxTrayEvent::Menu(event) if self.dashboard_id.as_ref().is_some_and(|id| id == &event.id) => self.open_dashboard(),
+            LinuxTrayEvent::Menu(event) if self.logs_id.as_ref().is_some_and(|id| id == &event.id) => self.open_logs(),
+            LinuxTrayEvent::Menu(event) if self.quit_id.as_ref().is_some_and(|id| id == &event.id) => {
+                self.shutdown.store(true, Ordering::Release);
+                event_loop.exit();
+            }
+            LinuxTrayEvent::Icon(TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. }) => self.open_logs(),
+            _ => {}
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        if self.shutdown.load(Ordering::Acquire) { event_loop.exit(); }
+        else { event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(std::time::Instant::now() + Duration::from_millis(200))); }
+    }
+
+    fn window_event(&mut self, _event_loop: &winit::event_loop::ActiveEventLoop, _window_id: winit::window::WindowId, _event: winit::event::WindowEvent) {}
+}
+
+#[cfg(target_os = "linux")]
+fn run_linux_server(cfg: Config) {
+    let mut cfg = cfg;
+    loop {
+        match run_server(cfg, None) {
+            Ok(Some(_)) => match config() {
+                Ok(next) => cfg = next,
+                Err(error) => { eprintln!("could not reload MediaBridge settings after restart: {error}"); break; }
+            },
+            Ok(None) => break,
+            Err(error) => { eprintln!("{error}"); break; }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn main() {
+    initialize_linux_log();
+    let cfg = match config() {
+        Ok(cfg) => cfg,
+        Err(error) => { append_linux_log(error); std::process::exit(2); }
+    };
+    let has_desktop_session = env::var_os("DISPLAY").is_some() || env::var_os("WAYLAND_DISPLAY").is_some();
+    if !has_desktop_session {
+        append_linux_log("No graphical desktop session detected; starting MediaBridge without a tray icon.");
+        run_linux_server(cfg);
+        return;
+    }
+
+    let event_loop = match winit::event_loop::EventLoop::<LinuxTrayEvent>::with_user_event().build() {
+        Ok(event_loop) => event_loop,
+        Err(error) => {
+            append_linux_log(format!("Could not start the desktop tray loop; running without a tray icon: {error}"));
+            run_linux_server(cfg);
+            return;
+        }
+    };
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let server_shutdown = Arc::clone(&shutdown);
+    let server_thread = thread::spawn(move || {
+        while !server_shutdown.load(Ordering::Acquire) {
+            let server_cfg = match config() {
+                Ok(cfg) => cfg,
+                Err(error) => { append_linux_log(error); server_shutdown.store(true, Ordering::Release); break; }
+            };
+            match run_server(server_cfg, Some(Arc::clone(&server_shutdown))) {
+                Ok(Some(_)) => continue,
+                Ok(None) => break,
+                Err(error) => { append_linux_log(error); server_shutdown.store(true, Ordering::Release); break; }
+            }
+        }
+    });
+    let dashboard_url = dashboard_url(&cfg.bind);
+    let proxy = event_loop.create_proxy();
+    tray_icon::TrayIconEvent::set_event_handler(Some(move |event| { let _ = proxy.send_event(LinuxTrayEvent::Icon(event)); }));
+    let proxy = event_loop.create_proxy();
+    tray_icon::menu::MenuEvent::set_event_handler(Some(move |event| { let _ = proxy.send_event(LinuxTrayEvent::Menu(event)); }));
+    let mut app = LinuxTrayApp {
+        shutdown: Arc::clone(&shutdown), dashboard_url, tray: None,
+        dashboard_id: None, logs_id: None, quit_id: None,
+    };
+    if let Err(error) = event_loop.run_app(&mut app) {
+        append_linux_log(format!("Linux tray event loop stopped: {error}"));
+    }
+    if app.tray.is_none() && !shutdown.load(Ordering::Acquire) {
+        append_linux_log("The desktop has no usable tray backend; continuing with MediaBridge running without a tray icon.");
+        shutdown.store(true, Ordering::Release);
+        let _ = server_thread.join();
+        run_linux_server(config().unwrap_or(cfg));
+        return;
+    }
+    shutdown.store(true, Ordering::Release);
+    let _ = server_thread.join();
 }
 
 #[cfg(windows)]
