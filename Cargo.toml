@@ -1,0 +1,22 @@
+[package]
+name = "mediabridge"
+version = "1.0.0"
+edition = "2024"
+description = "A lightweight LAN-controlled media playback bridge"
+
+[[bin]]
+name = "mediabridge"
+path = "main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = "0.10"
+tiny_http = "0.12"
+tungstenite = "0.24"
+
+[target.'cfg(windows)'.dependencies]
+tray-icon = "0.26"
+winit = "0.30"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+

@@ -1,0 +1,7 @@
+/target/
+/dist/
+/mediabridge.json
+/mediabridge.log
+/mediabridge-*.log
+*.cookies.txt
+cookies.txt
