@@ -21,6 +21,7 @@
     select { min-width: 170px; } .hidden { display: none !important; }
     .grow { flex: 1; min-width: 180px; } .time { display: flex; justify-content: space-between; font-variant-numeric: tabular-nums; }
     input[type=range] { width: 100%; padding: 0; accent-color: #35a6df; }
+    .row input[type=range] { flex: 1; width: auto; min-width: 100px; }
     #message { min-height: 1.5em; margin-top: 8px; color: #ffc66d; overflow-wrap: anywhere; }
     #playback-error { margin: 10px 0; padding: 10px 12px; border: 1px solid #a4444c; border-radius: 8px; color: #ffd7d9; background: #482127; overflow-wrap: anywhere; }
     #queue { padding-left: 22px; } #queue li { margin: 7px 0; overflow-wrap: anywhere; }
@@ -36,6 +37,7 @@
     .artwork img.thumbnail { display: block; width: 100%; max-height: 360px; object-fit: contain; background: #090c10; border-radius: 9px; }
     .artwork img.avatar { position: absolute; left: 12px; bottom: 12px; width: 68px; height: 68px; object-fit: cover; border: 3px solid #1a2029; border-radius: 50%; background: #11151b; }
     .queue-art { width: 56px; height: 40px; object-fit: cover; border-radius: 5px; margin-right: 8px; vertical-align: middle; background: #11151b; }
+    .account-avatar { width: 52px; height: 52px; object-fit: cover; border-radius: 50%; background: #11151b; border: 1px solid #465363; }
     #touchpad { height: 210px; border: 2px solid #465363; border-radius: 12px; background: linear-gradient(145deg,#151c25,#202a36); touch-action: none; user-select: none; display: grid; place-items: center; color: #a4afbd; }
     #touchpad.active { border-color: #35a6df; background: #1b2d3b; }
     @media (max-width: 520px) { .card { padding: 14px; } .row > button { flex: 1; } }
@@ -43,9 +45,24 @@
 </head>
 <body>
   <header class="row"><button id="toggle-settings" type="button" aria-expanded="false" aria-controls="settings-drawer">☰ Settings</button><h1>MediaBridge</h1><span id="connection" class="muted grow">Connecting…</span></header>
+  <div id="onboarding-slot"></div>
+  <section id="account-setup-card" class="card" aria-labelledby="accounts-heading">
+    <h2 id="accounts-heading">Connect your accounts</h2>
+    <p class="muted">On the MediaBridge computer, sign in with the browser profile MediaBridge uses, then check whether each site's cookies can be read. YouTube can also report the active channel and profile picture. Twitch currently confirms that its sign-in cookie is present; it cannot verify the session or identify the account yet.</p>
+    <div class="row" style="margin:12px 0">
+      <strong class="grow">YouTube</strong><img id="youtube-account-avatar" class="account-avatar hidden" alt="YouTube profile picture"><span id="youtube-account-status" class="muted" role="status">Not checked</span>
+      <button type="button" data-account-login="youtube">Sign in</button><button type="button" data-account-check="youtube">Check</button>
+    </div>
+    <div class="row" style="margin:12px 0">
+      <strong class="grow">Twitch</strong><img id="twitch-account-avatar" class="account-avatar hidden" alt="Twitch profile picture"><span id="twitch-account-status" class="muted" role="status">Not checked</span>
+      <button type="button" data-account-login="twitch">Sign in</button><button type="button" data-account-check="twitch">Check</button>
+    </div>
+    <div class="row"><button id="finish-account-setup" type="button">Done — move to Settings</button></div>
+  </section>
   <button id="settings-backdrop" class="hidden" type="button" aria-label="Close settings"></button>
   <aside id="settings-drawer" aria-hidden="true" aria-label="Permanent settings">
     <div class="row"><h2 style="margin:0;flex:1">Settings</h2><button id="close-settings" type="button">Close</button></div>
+    <div id="account-settings-slot"></div>
     <section class="card" aria-labelledby="remote-settings-heading">
       <h2 id="remote-settings-heading">Remote origin servers</h2>
       <p class="muted">Allow specific web apps to control this MediaBridge from a browser. Enter the site's origin (scheme, host, and optional port), without a path. Only add sites you trust.</p>
@@ -59,6 +76,7 @@
       <select id="default-quality"><option value="">Use player default</option><option value="best">Best available</option><option value="480">480p</option><option value="720">720p</option><option value="1080">1080p</option><option value="1440">1440p</option><option value="2160">2160p</option></select>
       <label for="default-screen">Preferred monitor index</label>
       <input id="default-screen" type="number" min="0" max="32" step="1" placeholder="Automatic">
+      <p class="muted">This selects mpv's display on Linux and Windows. On Windows it also selects the display for managed LibreWolf video playback.</p>
       <label style="display:flex;gap:8px;align-items:center"><input id="default-subtitles" type="checkbox"> Load subtitles by default</label>
       <label for="preferred-language">Preferred subtitle language</label>
       <input id="preferred-language" type="text" placeholder="For example: en" autocomplete="off">
@@ -66,7 +84,7 @@
       <select id="cookies-browser"><option value="auto">System default browser (automatic)</option><option value="librewolf">MediaBridge LibreWolf</option><option value="chrome">Google Chrome</option><option value="chromium">Chromium</option><option value="edge">Microsoft Edge</option><option value="firefox">Firefox</option><option value="brave">Brave</option><option value="opera">Opera</option><option value="vivaldi">Vivaldi</option><option value="whale">Whale</option><option value="off">Off</option></select>
       <label for="cookies-profile">Browser profile (optional)</label>
       <input id="cookies-profile" type="text" placeholder="Default, Profile 1, or Firefox profile name" autocomplete="off">
-      <p class="muted">Uses the selected browser's local profile through yt-dlp. MediaBridge does not access your YouTube account through OAuth. On Windows, Chromium browsers can lock their cookie database while open; fully quit the browser and retry if the error says it could not copy the database. You can keep this dashboard open on another device while doing that. A DPAPI decryption error is different and will not be fixed by closing the browser; try a Firefox profile signed into YouTube or another supported cookie source.</p>
+      <p class="muted">Uses the persistent MediaBridge LibreWolf profile through yt-dlp. MediaBridge does not access your YouTube account through OAuth. Sign in from the Connect your accounts section, then check cookie access here or in that section.</p>
       <div class="row"><button id="check-cookies" type="button">Check cookie access</button><img id="youtube-channel-avatar" class="avatar hidden" alt="YouTube channel profile picture"><span id="cookies-status" class="muted" role="status"></span></div>
       <div class="row" style="margin-top:12px"><button id="save-playback-preferences" class="primary" type="button">Save playback defaults</button><span id="preferences-status" class="muted" role="status"></span></div>
     </section>
@@ -80,22 +98,31 @@
   </aside>
   <section class="card">
     <h2>Add media</h2>
+    <div id="media-controls">
     <label for="url">Paste a video or stream link</label>
     <textarea id="url" placeholder="https://www.youtube.com/watch?v=… or smb://server/share/video.mp4"></textarea>
     <div class="row">
-      <div><label for="mode">Playback</label><select id="mode"><option value="local">Direct player (mpv + yt-dlp)</option><option value="browser">Web browser</option></select></div>
+      <div><label for="mode">Playback</label><select id="mode"><option value="local">Direct player (mpv + yt-dlp)</option><option value="browser">Web browser</option><option value="sunshine">Sunshine / Moonlight</option></select></div>
       <div id="quality-wrap"><label for="quality">Maximum quality</label><select id="quality"><option value="best">Best available</option><option>480</option><option>720</option><option>1080</option><option>1440</option><option>2160</option></select></div>
-      <div id="screen-wrap"><label for="screen">mpv display index</label><input id="screen" type="number" min="0" max="32" step="1" placeholder="Default" style="width:110px"><small class="muted">Optional, starts at 0</small></div>
+      <div id="screen-wrap"><label id="screen-label" for="screen">mpv display index</label><input id="screen" type="number" min="0" max="32" step="1" placeholder="Default" style="width:110px"><small id="screen-help" class="muted">Optional, starts at 0</small></div>
       <div id="browser-wrap" class="hidden"><label for="browser">Browser</label><select id="browser"><option value="chromium">Chromium</option><option value="firefox">Firefox</option><option value="librewolf">MediaBridge LibreWolf</option><option value="">System default</option></select></div>
     </div>
     <label style="display:flex;gap:8px;align-items:center;margin-top:10px"><input id="subtitles" type="checkbox"> Load subtitles (slower)</label>
     <div class="row" style="margin-top:14px">
       <button id="preview">Preview link</button><button id="play-now" class="primary">Play now</button><button id="play-next">Play next</button><button id="play-last">Play last</button>
     </div>
+    </div>
+    <div id="sunshine-wrap" class="hidden" aria-labelledby="sunshine-heading">
+      <h3 id="sunshine-heading">Connect to Sunshine</h3>
+      <p id="sunshine-pair-hint" class="muted">Enter the Sunshine PC's IP address or host name. For first-time setup, pair this MediaBridge Moonlight client with Sunshine. Moonlight will show a PIN; enter it in Sunshine's pairing page, then close Moonlight's success dialog. MediaBridge will verify the saved pairing and remember setup in this dashboard.</p>
+      <div class="row"><input id="sunshine-host" class="grow" type="text" placeholder="192.168.1.50" autocomplete="off" aria-label="Sunshine host address"><input id="sunshine-app" type="text" value="Desktop" placeholder="Desktop" aria-label="Sunshine application" style="width:140px"><button id="sunshine-pair" type="button">Pair</button><button id="sunshine-connect" class="primary" type="button">Connect</button></div>
+      <p id="sunshine-status" class="muted" role="status"></p>
+    </div>
     <div id="message" role="status"></div>
   </section>
   <section class="card">
     <h2>Now playing</h2>
+    <p id="browser-controls-note" class="muted hidden" role="note"></p>
     <div id="artwork" class="artwork hidden"><img id="banner" class="banner hidden" alt="Channel banner"><img id="thumbnail" class="thumbnail hidden" alt="Video thumbnail"><img id="avatar" class="avatar hidden" alt="Channel profile picture"></div>
     <div id="title">Nothing playing</div><div id="playback-state" class="muted">Idle</div>
     <div id="playback-error" class="hidden" role="alert"></div>
@@ -105,10 +132,10 @@
       <button id="previous" disabled>Previous</button><button data-control="rewind">−5 sec</button>
       <button data-control="pause">Pause</button><button data-control="resume">Play</button>
       <button data-control="forward">+5 sec</button><button id="next" disabled>Next</button>
-      <button id="quit" class="danger">Quit</button>
+    <button id="quit" class="danger" title="Closes playback and MediaBridge's LibreWolf windows">Quit</button>
     </div>
     <label for="volume">Volume <span id="volume-label">—</span></label>
-    <input id="volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume">
+    <div class="row"><button data-control="volume_down" aria-label="Volume down">−</button><input id="volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume"><button data-control="volume_up" aria-label="Volume up">+</button></div>
   </section>
   <section class="card"><h2>Queue</h2><ol id="queue"><li class="muted">Queue is empty</li></ol></section>
   <section class="card">
@@ -124,12 +151,26 @@
   const message = text => { $('message').textContent = text || ''; };
   const mode = $('mode');
   let isLinuxPlatform = false;
+  let browserMonitorPlacementSupported = false;
   function setSettingsOpen(open) {
     document.body.classList.toggle('settings-open', open);
     $('settings-backdrop').classList.toggle('hidden', !open);
     $('toggle-settings').setAttribute('aria-expanded', String(open));
     $('settings-drawer').setAttribute('aria-hidden', String(!open));
   }
+  const ACCOUNT_SETUP_KEY = 'mediabridge.account-setup-dismissed.v1';
+  const accountSetupCard = $('account-setup-card');
+  let accountSetupDismissed = false;
+  try {
+    accountSetupDismissed = localStorage.getItem(ACCOUNT_SETUP_KEY) === 'yes';
+    if (!accountSetupDismissed) localStorage.setItem(ACCOUNT_SETUP_KEY, 'yes');
+  } catch (_) {}
+  if (accountSetupDismissed) $('account-settings-slot').append(accountSetupCard);
+  $('finish-account-setup').onclick = () => {
+    try { localStorage.setItem(ACCOUNT_SETUP_KEY, 'yes'); } catch (_) {}
+    $('account-settings-slot').append(accountSetupCard);
+    setSettingsOpen(true);
+  };
   $('toggle-settings').onclick = () => setSettingsOpen(!$('toggle-settings').matches('[aria-expanded="true"]'));
   $('close-settings').onclick = () => setSettingsOpen(false);
   $('settings-backdrop').onclick = () => setSettingsOpen(false);
@@ -140,10 +181,41 @@
     $('toggle-touchpad').setAttribute('aria-expanded', String(expanded));
   };
   mode.addEventListener('change', () => {
+    $('media-controls').classList.toggle('hidden', mode.value === 'sunshine');
+    $('sunshine-wrap').classList.toggle('hidden', mode.value !== 'sunshine');
     $('quality-wrap').classList.toggle('hidden', mode.value !== 'local');
-    $('screen-wrap').classList.toggle('hidden', mode.value !== 'local');
     $('browser-wrap').classList.toggle('hidden', mode.value !== 'browser');
+    updateDisplayField();
+    updateSunshinePairButton();
+    if (mode.value === 'sunshine') resumeSunshinePairing();
   });
+  const SUNSHINE_PAIRED_KEY = 'mediabridge.sunshine-paired-hosts.v1';
+  function pairedSunshineHosts() {
+    try { const hosts = JSON.parse(localStorage.getItem(SUNSHINE_PAIRED_KEY) || '[]'); return Array.isArray(hosts) ? hosts : []; }
+    catch (_) { return []; }
+  }
+  function sunshineHostPaired(host) { return pairedSunshineHosts().includes(host.trim().toLowerCase()); }
+  function rememberSunshineHost(host) {
+    const hosts = new Set(pairedSunshineHosts()); hosts.add(host.trim().toLowerCase());
+    try { localStorage.setItem(SUNSHINE_PAIRED_KEY, JSON.stringify([...hosts])); } catch (_) {}
+    updateSunshinePairButton();
+  }
+  function updateSunshinePairButton() {
+    const button = $('sunshine-pair'), host = $('sunshine-host').value.trim();
+    const paired = host && sunshineHostPaired(host);
+    button.classList.toggle('hidden', Boolean(paired));
+    $('sunshine-pair-hint').classList.toggle('hidden', Boolean(paired));
+    button.textContent = 'Pair';
+  }
+  $('sunshine-host').addEventListener('input', updateSunshinePairButton);
+  function updateDisplayField() {
+    const managedBrowser = browserMonitorPlacementSupported && mode.value === 'browser' && $('browser').value.toLowerCase().includes('librewolf');
+    $('screen-wrap').classList.toggle('hidden', mode.value !== 'local' && !managedBrowser);
+    $('screen-label').textContent = mode.value === 'local' ? 'mpv display index' : 'LibreWolf display index';
+    $('screen-help').textContent = managedBrowser ? 'Optional; Windows display index starts at 0' : 'Optional, starts at 0';
+  }
+  $('browser').addEventListener('change', updateDisplayField);
+  mode.dispatchEvent(new Event('change'));
   function cleanLink(text) {
     const smb = text.trim().match(/smb:\/\/[^\s<>"']+/i);
     if (smb) return smb[0].replace(/[),.;!\]}]+$/, '');
@@ -152,8 +224,8 @@
     if (/^(?:youtube\.com|www\.youtube\.com|m\.youtube\.com|youtu\.be|twitch\.tv|www\.twitch\.tv)\//i.test(link)) link = 'https://' + link;
     return link;
   }
-  async function api(path, body) {
-    const options = {method: 'POST'};
+  async function api(path, body, method = 'POST') {
+    const options = {method};
     if (body) { options.headers = {'Content-Type':'application/json'}; options.body = JSON.stringify(body); }
     const response = await fetch(path, options);
     const data = await response.json().catch(() => ({}));
@@ -230,12 +302,14 @@
   async function configurePlatform() {
     try {
       const response = await fetch('/platform', {cache:'no-store'}), platform = await response.json();
-      if (platform.os !== 'linux') {
+      if (!['linux', 'windows'].includes(platform.os)) {
         $('cookies-browser').querySelector('option[value="librewolf"]')?.remove();
         $('browser').querySelector('option[value="librewolf"]')?.remove();
         return;
       }
       isLinuxPlatform = true;
+      browserMonitorPlacementSupported = platform.os === 'windows';
+      updateDisplayField();
       const cookieBrowser = $('cookies-browser');
       [...cookieBrowser.options].forEach(option => { if (!['librewolf', 'off'].includes(option.value)) option.remove(); });
       cookieBrowser.value = 'librewolf';
@@ -243,10 +317,14 @@
       $('cookies-profile').placeholder = 'Uses the managed persistent profile';
       $('cookies-profile').value = '';
       const cookieHelp = $('cookies-profile').nextElementSibling;
-      if (cookieHelp?.classList.contains('muted')) cookieHelp.textContent = 'Uses the persistent MediaBridge LibreWolf profile with uBlock Origin. Sign in to YouTube once in this browser; cookies are kept when it closes.';
+      if (cookieHelp?.classList.contains('muted')) cookieHelp.textContent = 'Uses the persistent MediaBridge LibreWolf profile with uBlock Origin. Sign in to supported sites in this browser; cookies are kept when it closes.';
       const browser = $('browser');
       browser.replaceChildren(new Option('MediaBridge LibreWolf', 'librewolf'));
       browser.value = 'librewolf';
+      if (platform.os === 'windows') {
+        $('browser-controls-note').textContent = 'Managed LibreWolf playback supports play, pause, seeking, and volume controls when a video tab is active.';
+        $('browser-controls-note').classList.remove('hidden');
+      }
     } catch (_) {}
   }
   $('save-playback-preferences').onclick = async () => {
@@ -271,17 +349,102 @@
     finally { button.disabled = false; }
   };
   $('check-cookies').onclick = async () => {
-    const button = $('check-cookies'), avatar = $('youtube-channel-avatar'); button.disabled = true; avatar.removeAttribute('src'); avatar.classList.add('hidden'); $('cookies-status').textContent = 'Checking browser profile access and YouTube…';
+    const button = $('check-cookies'); button.disabled = true; $('cookies-status').textContent = 'Checking browser profile access and YouTube…';
     try {
-      const result = await api('/settings/cookies/check', {cookies_browser:$('cookies-browser').value, cookies_profile:$('cookies-profile').value.trim() || null});
+      const result = await checkAccountCookies('youtube');
       $('cookies-status').textContent = result.channel_name
         ? `Cookies loaded successfully from ${result.browser}. YouTube channel: ${result.channel_name}.`
         : `Cookies read successfully from ${result.browser} and YouTube responded, but its active channel profile details were unavailable.`;
-      if (result.channel_avatar_url) {
-        avatar.src = result.channel_avatar_url; avatar.alt = result.channel_name ? `${result.channel_name} profile picture` : 'YouTube channel profile picture'; avatar.classList.remove('hidden');
-        avatar.onerror = () => { avatar.removeAttribute('src'); avatar.classList.add('hidden'); };
-      }
     } catch (error) { $('cookies-status').textContent = 'Could not confirm cookie access: ' + error.message; }
+    finally { button.disabled = false; }
+  };
+  async function checkAccountCookies(site) {
+    const avatar = $(`${site}-account-avatar`), status = $(`${site}-account-status`);
+    avatar.removeAttribute('src'); avatar.classList.add('hidden'); status.textContent = 'Checking…';
+    try {
+      const result = await api('/settings/cookies/check', {site, cookies_browser:$('cookies-browser').value, cookies_profile:$('cookies-profile').value.trim() || null});
+      if (site === 'youtube') {
+        status.textContent = result.channel_name ? `Signed in as ${result.channel_name}` : `Cookies confirmed in ${result.browser}`;
+        if (result.channel_avatar_url) { avatar.src = result.channel_avatar_url; avatar.classList.remove('hidden'); }
+      } else {
+        status.textContent = result.profile_name
+          ? `Twitch auth cookie found (${result.profile_name}); session not validated`
+          : 'Twitch auth cookie found; session not validated';
+      }
+      avatar.onerror = () => { avatar.removeAttribute('src'); avatar.classList.add('hidden'); };
+      return result;
+    } catch (error) { status.textContent = 'Not confirmed: ' + error.message; throw error; }
+  }
+  document.querySelectorAll('[data-account-login]').forEach(button => button.onclick = () => {
+    const site = button.dataset.accountLogin;
+    window.open(site === 'youtube' ? 'https://www.youtube.com/' : 'https://www.twitch.tv/', '_blank', 'noopener,noreferrer');
+  });
+  document.querySelectorAll('[data-account-check]').forEach(button => button.onclick = () => checkAccountCookies(button.dataset.accountCheck).catch(() => {}));
+  let sunshinePairPoll = null;
+  async function pollSunshinePairing(host) {
+    try {
+      const result = await api('/sunshine/pair/status', null, 'GET');
+      if (result.host && result.host.toLowerCase() !== host.toLowerCase()) return;
+      if (result.state === 'paired') {
+        rememberSunshineHost(host);
+        $('sunshine-status').textContent = `Pairing with ${host} was confirmed.`;
+        clearInterval(sunshinePairPoll); sunshinePairPoll = null;
+      } else if (result.state === 'failed') {
+        $('sunshine-status').textContent = result.error || 'Pairing did not complete.';
+        clearInterval(sunshinePairPoll); sunshinePairPoll = null;
+        $('sunshine-pair').disabled = false;
+      } else if (result.state === 'waiting') {
+        $('sunshine-status').textContent = result.message === 'Verifying the pairing'
+          ? `PIN accepted. Verifying the saved Moonlight pairing with ${host}…`
+          : `Enter the PIN shown in Moonlight on ${host}'s Sunshine pairing page, then close Moonlight's success dialog.`;
+      } else {
+        clearInterval(sunshinePairPoll); sunshinePairPoll = null;
+        $('sunshine-status').textContent = 'Pairing was closed before it could be confirmed.';
+        $('sunshine-pair').disabled = false;
+      }
+    } catch (error) {
+      $('sunshine-status').textContent = error.message;
+      clearInterval(sunshinePairPoll); sunshinePairPoll = null;
+      $('sunshine-pair').disabled = false;
+    }
+  }
+  async function resumeSunshinePairing() {
+    if (sunshinePairPoll) return;
+    const host = $('sunshine-host').value.trim();
+    if (!host) return;
+    try {
+      const result = await api('/sunshine/pair/status', null, 'GET');
+      if (result.state === 'paired' && result.host?.toLowerCase() === host.toLowerCase()) {
+        rememberSunshineHost(host);
+        $('sunshine-status').textContent = `Pairing with ${host} was confirmed.`;
+      } else if (result.state === 'waiting' && result.host?.toLowerCase() === host.toLowerCase()) {
+        sunshinePairPoll = setInterval(() => pollSunshinePairing(host), 1200);
+        pollSunshinePairing(host);
+      }
+    } catch (_) {}
+  }
+  $('sunshine-pair').onclick = async () => {
+    const host = $('sunshine-host').value.trim(), button = $('sunshine-pair');
+    if (!host) { $('sunshine-status').textContent = 'Enter the Sunshine PC IP address or host name.'; return; }
+    button.disabled = true; $('sunshine-status').textContent = 'Opening Moonlight pairing…';
+    try {
+      await api('/sunshine/pair', {host});
+      if (sunshinePairPoll) clearInterval(sunshinePairPoll);
+      sunshinePairPoll = setInterval(() => pollSunshinePairing(host), 1200);
+      pollSunshinePairing(host);
+    } catch (error) {
+      $('sunshine-status').textContent = error.message;
+      button.disabled = false;
+    }
+  };
+  $('sunshine-connect').onclick = async () => {
+    const host = $('sunshine-host').value.trim(), app = $('sunshine-app').value.trim() || 'Desktop', button = $('sunshine-connect');
+    if (!host) { $('sunshine-status').textContent = 'Enter the Sunshine PC IP address or host name.'; return; }
+    button.disabled = true; $('sunshine-status').textContent = 'Starting Moonlight…';
+    try {
+      await api('/sunshine', {host, app});
+      $('sunshine-status').textContent = `Moonlight was launched for ${host} (${app}). If it reports that this PC is not paired, select Pair first.`;
+    } catch (error) { $('sunshine-status').textContent = error.message; }
     finally { button.disabled = false; }
   };
   fetch('/settings/port', {cache:'no-store'}).then(response => response.ok ? response.json() : null).then(data => {
@@ -309,14 +472,14 @@
     if (smb && mode.value !== 'local') throw new Error('SMB shares require Direct player (mpv) mode.');
     const item = {url};
     item.subtitles = $('subtitles').checked;
+    if ($('screen').value !== '' && (mode.value === 'local' || $('browser').value.toLowerCase().includes('librewolf'))) {
+      const screen = Number($('screen').value);
+      if (!Number.isInteger(screen) || screen < 0 || screen > 32) throw new Error('Display index must be a number from 0 to 32.');
+      item.screen = screen;
+    }
     if (mode.value === 'local') {
       item.local = true;
       if ($('quality').value !== 'best') item.quality = $('quality').value;
-      if ($('screen').value !== '') {
-        const screen = Number($('screen').value);
-        if (!Number.isInteger(screen) || screen < 0 || screen > 32) throw new Error('Display index must be a number from 0 to 32.');
-        item.screen = screen;
-      }
     } else if ($('browser').value) item.browser = $('browser').value;
     return item;
   }
@@ -353,7 +516,7 @@
       }
       message(/^smb:\/\//i.test(item.url) ? 'Adding SMB media…' : path === '/play' ? 'Starting playback…' : 'Adding to queue…');
       const result = await api(playlistPath || path, item);
-      if (!playlistPath && !cachedInfo && !/^smb:\/\//i.test(originalUrl)) {
+      if (!playlistPath && item.local && !cachedInfo && !/^smb:\/\//i.test(originalUrl)) {
         api('/resolve_async', {url:originalUrl}).catch(() => {});
       }
       $('url').value = ''; previewCache = null;
@@ -440,6 +603,7 @@
       if (!draggingSeek && Date.now() - lastSeekSent > 800) $('seek').value = String(Math.min(position, duration || position));
       if (Number.isFinite(state.volume)) { $('volume').value = String(state.volume); $('volume-label').textContent = `${Math.round(state.volume*100)}%`; }
       else $('volume-label').textContent = '—';
+      $('volume').disabled = !Number.isFinite(state.volume);
       $('next').disabled = !state.queued?.length; $('previous').disabled = !state.previous_available;
       const list = $('queue'); list.replaceChildren();
       if (!state.queued?.length) { const li = document.createElement('li'); li.className = 'muted'; li.textContent = 'Queue is empty'; list.append(li); }

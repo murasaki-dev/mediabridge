@@ -1,5 +1,5 @@
-//! A small, single-file media bridge. The browser and Moonlight are external
-//! programs, keeping this process and its dependencies small.
+//! A small, single-file media bridge. Browser and Moonlight are separate
+//! programs, with the installers optionally bundling their runtime files.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
@@ -142,7 +142,7 @@ impl Default for UserConfig {
             default_quality: None,
             subtitles: false,
             preferred_language: None,
-            cookies_browser: if cfg!(target_os = "linux") { "librewolf" } else { "auto" }.into(),
+            cookies_browser: if cfg!(target_os = "linux") || cfg!(windows) { "librewolf" } else { "auto" }.into(),
             cookies_profile: None,
         }
     }
@@ -375,6 +375,8 @@ struct State {
     queue: VecDeque<QueueItem>,
     history: VecDeque<QueueItem>,
     mirror: Option<Child>,
+    moonlight_pairing: Option<MoonlightPairing>,
+    moonlight_pair_result: Option<(String, bool)>,
     player_error_tx: Option<Sender<(u64, String)>>,
     player_error_rx: Option<Receiver<(u64, String)>>,
     metadata_tx: Option<Sender<(String, Result<serde_json::Value, String>)>>,
@@ -384,6 +386,39 @@ struct State {
     playback_epoch: u64,
     playback_error: Option<String>,
     restart_bind: Option<String>,
+    #[cfg(any(windows, target_os = "linux"))]
+    librewolf_bidi: Option<LibreWolfBidi>,
+    #[cfg(any(windows, target_os = "linux"))]
+    librewolf_bidi_retry_at: Option<std::time::Instant>,
+}
+
+struct MoonlightPairing {
+    host: String,
+    executable: String,
+    child: Child,
+    verifying: bool,
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+struct LibreWolfBidi {
+    socket: WebSocket<MaybeTlsStream<TcpStream>>,
+    next_id: u64,
+    context_id: Option<String>,
+    cached_at: Option<std::time::Instant>,
+    cached_video: Option<LibreWolfVideoState>,
+    autoplay_attempted: bool,
+    fullscreen_attempted_at: Option<std::time::Instant>,
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+#[derive(Clone, Default)]
+struct LibreWolfVideoState {
+    title: Option<String>,
+    current_time: Option<f64>,
+    duration: Option<f64>,
+    volume: Option<f64>,
+    paused: Option<bool>,
+    ended: bool,
 }
 
 #[derive(Deserialize)]
@@ -414,7 +449,11 @@ struct CookieCheckRequest {
     cookies_browser: String,
     #[serde(default)]
     cookies_profile: Option<String>,
+    #[serde(default = "default_cookie_site")]
+    site: String,
 }
+
+fn default_cookie_site() -> String { "youtube".into() }
 
 #[derive(Deserialize)]
 struct PlaybackPreferencesRequest {
@@ -511,6 +550,84 @@ fn usage() -> &'static str {
      Moonlight arguments may contain {host} and {app}; defaults are `stream {host} {app}`."
 }
 
+fn bundled_moonlight_path() -> Option<String> {
+    let executable = env::current_exe().ok()?;
+    let install_dir = executable.parent()?;
+    #[cfg(windows)]
+    let candidates = [install_dir.join("moonlight").join("Moonlight.exe")];
+    #[cfg(target_os = "linux")]
+    let candidates = [
+        install_dir.join("moonlight-current").join("squashfs-root").join("AppRun"),
+        install_dir.join("moonlight").join("AppRun"),
+    ];
+    #[cfg(not(any(windows, target_os = "linux")))]
+    let candidates: [PathBuf; 0] = [];
+    candidates.into_iter().find(|path| path.is_file()).map(|path| path.to_string_lossy().into_owned())
+}
+
+fn moonlight_command(cfg: &Config) -> Command {
+    let mut command = Command::new(&cfg.moonlight);
+    if let Some(directory) = Path::new(&cfg.moonlight).parent().filter(|path| !path.as_os_str().is_empty()) {
+        command.current_dir(directory);
+    }
+    command
+}
+
+fn moonlight_pair_status(state: &mut State) -> serde_json::Value {
+    if let Some(mut pairing) = state.moonlight_pairing.take() {
+        match pairing.child.try_wait() {
+            Ok(None) => {
+                let response = if pairing.verifying { "Verifying the pairing" } else { "Waiting for the Sunshine PIN confirmation" };
+                let result = serde_json::json!({"state":"waiting", "host":pairing.host, "message":response});
+                state.moonlight_pairing = Some(pairing);
+                return result;
+            }
+            Err(error) => {
+                let host = pairing.host.clone();
+                state.moonlight_pair_result = Some((host.clone(), false));
+                return serde_json::json!({"state":"failed", "host":host, "error":format!("could not check Moonlight pairing: {error}")});
+            }
+            Ok(Some(status)) if !pairing.verifying && status.success() => {
+                let mut command = Command::new(&pairing.executable);
+                command.arg("list").arg(&pairing.host)
+                    .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+                if let Some(directory) = Path::new(&pairing.executable).parent().filter(|path| !path.as_os_str().is_empty()) {
+                    command.current_dir(directory);
+                }
+                match command.spawn() {
+                    Ok(child) => {
+                        pairing.child = child;
+                        pairing.verifying = true;
+                        state.moonlight_pairing = Some(pairing);
+                        return serde_json::json!({"state":"waiting", "host":state.moonlight_pairing.as_ref().unwrap().host, "message":"Verifying the pairing"});
+                    }
+                    Err(error) => {
+                        let host = pairing.host.clone();
+                        state.moonlight_pair_result = Some((host.clone(), false));
+                        return serde_json::json!({"state":"failed", "host":host, "error":format!("Moonlight could not verify the new pairing: {error}")});
+                    }
+                }
+            }
+            Ok(Some(status)) => {
+                let host = pairing.host.clone();
+                let paired = pairing.verifying && status.success();
+                state.moonlight_pair_result = Some((host.clone(), paired));
+                return if paired {
+                    serde_json::json!({"state":"paired", "host":host})
+                } else {
+                    serde_json::json!({"state":"failed", "host":host, "error":"Moonlight pairing was not confirmed. Check the PIN in Moonlight and the Sunshine pairing page."})
+                };
+            }
+        }
+    }
+    if let Some((host, paired)) = state.moonlight_pair_result.as_ref() {
+        if *paired { serde_json::json!({"state":"paired", "host":host}) }
+        else { serde_json::json!({"state":"failed", "host":host, "error":"Moonlight pairing did not complete. Check the PIN in Moonlight and the Sunshine pairing page."}) }
+    } else {
+        serde_json::json!({"state":"idle"})
+    }
+}
+
 fn config() -> Result<Config, String> {
     let user = load_user_config()?;
     let mut bind = user.bind.clone();
@@ -532,10 +649,15 @@ fn config() -> Result<Config, String> {
     }
     let mut c = Config {
         bind: bind.clone(),
-        moonlight: "moonlight".into(),
+        moonlight: env::var("MEDIABRIDGE_MOONLIGHT")
+            .ok().filter(|path| !path.trim().is_empty())
+            .or_else(bundled_moonlight_path)
+            .unwrap_or_else(|| if cfg!(windows) { "moonlight.exe" } else { "moonlight" }.into()),
         moonlight_args: Vec::new(),
         ytdlp_cookies_from_browser: env::var("MEDIABRIDGE_COOKIES_FROM_BROWSER").ok().filter(|v| !v.trim().is_empty()),
-        cookies_browser: user.cookies_browser,
+        cookies_browser: if user.cookies_browser == "auto" && (cfg!(target_os = "linux") || cfg!(windows)) {
+            "librewolf".into()
+        } else { user.cookies_browser },
         cookies_profile: user.cookies_profile,
         remote_origin_servers,
         default_screen: user.default_screen,
@@ -597,7 +719,44 @@ fn cookie_browser_spec(browser: &str, profile: Option<&str>) -> Result<Option<St
             .ok_or("could not locate the MediaBridge LibreWolf profile")?;
         return Ok(Some(format!("firefox:{}", profile.display())));
     }
+    #[cfg(windows)]
+    if resolved == "librewolf" {
+        let profile = managed_librewolf_profile()
+            .ok_or("could not locate the MediaBridge LibreWolf profile")?;
+        return Ok(Some(format!("firefox:{}", profile.display())));
+    }
     Ok(Some(match profile { Some(profile) => format!("{resolved}:{profile}"), None => resolved }))
+}
+
+#[cfg(windows)]
+fn managed_librewolf_profile() -> Option<PathBuf> {
+    env::current_exe().ok()?.parent().map(|dir| dir.join("librewolf-profile"))
+}
+
+#[cfg(windows)]
+fn ensure_librewolf_profile(profile: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(profile).map_err(|error| format!("could not create the persistent LibreWolf profile: {error}"))?;
+    let prefs = profile.join("user.js");
+    let existing = std::fs::read_to_string(&prefs).unwrap_or_default();
+    let required = [
+        ("privacy.clearOnShutdown.cookies", "user_pref(\"privacy.clearOnShutdown.cookies\", false);\n"),
+        ("privacy.clearOnShutdown_v2.cookiesAndStorage", "user_pref(\"privacy.clearOnShutdown_v2.cookiesAndStorage\", false);\n"),
+        ("privacy.sanitize.sanitizeOnShutdown", "user_pref(\"privacy.sanitize.sanitizeOnShutdown\", false);\n"),
+        ("media.autoplay.default", "user_pref(\"media.autoplay.default\", 0);\n"),
+        ("media.autoplay.blocking_policy", "user_pref(\"media.autoplay.blocking_policy\", 0);\n"),
+        ("browser.aboutwelcome.enabled", "user_pref(\"browser.aboutwelcome.enabled\", false);\n"),
+        ("browser.shell.checkDefaultBrowser", "user_pref(\"browser.shell.checkDefaultBrowser\", false);\n"),
+        ("browser.startup.firstrunSkipsHomepage", "user_pref(\"browser.startup.firstrunSkipsHomepage\", true);\n"),
+        ("security.insecure_connection_text.enabled", "user_pref(\"security.insecure_connection_text.enabled\", false);\n"),
+    ];
+    let missing = required.iter().filter(|(key, _)| !existing.contains(key)).map(|(_, line)| *line).collect::<String>();
+    if !missing.is_empty() {
+        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&prefs)
+            .map_err(|error| format!("could not configure the persistent LibreWolf profile: {error}"))?;
+        if existing.is_empty() { file.write_all(b"// MediaBridge browser settings.\n").ok(); }
+        file.write_all(missing.as_bytes()).map_err(|error| format!("could not configure the persistent LibreWolf profile: {error}"))?;
+    }
+    Ok(())
 }
 
 fn configured_cookie_source(cfg: &Config) -> (String, Option<String>) {
@@ -739,15 +898,62 @@ fn youtube_account_from_cookies(cookie_file: &Path) -> Result<Option<(String, Op
     Ok(active_youtube_account(&account))
 }
 
-fn check_cookie_access(browser: &str, profile: Option<&str>) -> Result<serde_json::Value, String> {
+fn check_cookie_access(browser: &str, profile: Option<&str>, site: &str) -> Result<serde_json::Value, String> {
     let spec = cookie_browser_spec(browser, profile)?.ok_or("browser cookie access is turned off")?;
     let temp_dir = cookie_check_temp_dir()?;
-    let cookie_file = temp_dir.0.join("youtube-cookies.txt");
+    let cookie_file = temp_dir.0.join(format!("{site}-cookies.txt"));
     let mut command = media_tool_command("yt-dlp");
-    command.arg("--cookies-from-browser").arg(&spec).arg("--cookies").arg(&cookie_file)
-        .args(["--dump-single-json", "--skip-download", "--no-playlist", "--no-warnings", "--remote-components", "ejs:github", "https://www.youtube.com/watch?v=dQw4w9WgXcQ"]);
+    command.arg("--cookies-from-browser").arg(&spec).arg("--cookies").arg(&cookie_file);
+    if site == "twitch" {
+        // The generated Netscape cookie export is inspected for Twitch's auth
+        // cookie. This confirms that yt-dlp can read the profile and that a
+        // Twitch session cookie exists, but cannot prove the session is valid.
+        command.args(["--skip-download", "--simulate", "--no-warnings", "https://www.twitch.tv/twitch"]);
+    } else {
+        command.args(["--dump-single-json", "--skip-download", "--no-playlist", "--no-warnings", "--remote-components", "ejs:github", "https://www.youtube.com/watch?v=dQw4w9WgXcQ"]);
+    }
     add_deno_to_path(&mut command);
     let output = command.output().map_err(|e| format!("could not run yt-dlp to check browser cookies: {e}"))?;
+    if site == "twitch" {
+        let extractor_error = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let lower_error = extractor_error.to_ascii_lowercase();
+        if lower_error.contains("failed to decrypt with dpapi") {
+            return Err("Windows could not decrypt this browser profile's cookies through DPAPI. Try the managed LibreWolf profile and make sure MediaBridge runs as the same Windows user that owns it.".into());
+        }
+        if lower_error.contains("could not copy chrome cookie database") {
+            return Err("Could not read the Chromium browser cookie database. Sign in with the managed LibreWolf profile, or fully quit Chrome/Edge and retry.".into());
+        }
+        let contents = std::fs::read_to_string(&cookie_file).map_err(|_| {
+            let error = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let lower_error = error.to_ascii_lowercase();
+            if lower_error.contains("failed to decrypt with dpapi") {
+                "Windows could not decrypt this browser profile's cookies through DPAPI. Try the managed LibreWolf profile and make sure MediaBridge runs as the same Windows user that owns it.".to_string()
+            } else if lower_error.contains("could not copy chrome cookie database") {
+                "Could not read the Chromium browser cookie database. Sign in with the managed LibreWolf profile, or fully quit Chrome/Edge and retry.".to_string()
+            } else if error.is_empty() {
+                "yt-dlp could not export cookies from this browser profile.".to_string()
+            } else { error }
+        })?;
+        let auth = contents.lines().filter(|line| !line.starts_with('#') || line.starts_with("#HttpOnly_"))
+            .filter_map(|line| { let fields = line.trim_start_matches("#HttpOnly_").split('\t').collect::<Vec<_>>();
+                let domain = fields.first().map(|value| value.trim_start_matches('.').to_ascii_lowercase()).unwrap_or_default();
+                (fields.len() >= 7 && (domain == "twitch.tv" || domain.ends_with(".twitch.tv")))
+                    .then(|| (fields[5], fields[6])) }).find(|(name, _)| *name == "auth-token");
+        let login = contents.lines().filter(|line| !line.starts_with('#') || line.starts_with("#HttpOnly_"))
+            .filter_map(|line| { let fields = line.trim_start_matches("#HttpOnly_").split('\t').collect::<Vec<_>>();
+                let domain = fields.first().map(|value| value.trim_start_matches('.').to_ascii_lowercase()).unwrap_or_default();
+                (fields.len() >= 7 && (domain == "twitch.tv" || domain.ends_with(".twitch.tv")) && fields[5] == "login")
+                    .then(|| fields[6].to_string()) }).next();
+        if auth.is_none() {
+            return Err("yt-dlp could read this browser profile, but no Twitch auth cookie was found. Sign in to Twitch in this browser and retry.".into());
+        }
+        #[cfg(target_os = "linux")]
+        let browser_label = if browser == "librewolf" || browser == "auto" { "MediaBridge LibreWolf".to_string() } else { spec.clone() };
+        #[cfg(not(target_os = "linux"))]
+        let browser_label = spec.clone();
+        return Ok(serde_json::json!({"ok": true, "site": "twitch", "browser": browser_label,
+            "cookie_found": true, "profile_name": login, "profile_avatar_url": null}));
+    }
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let lower_error = error.to_ascii_lowercase();
@@ -759,6 +965,9 @@ fn check_cookie_access(browser: &str, profile: Option<&str>) -> Result<serde_jso
         }
         return Err(if error.is_empty() { format!("yt-dlp cookie check failed ({})", output.status) } else { error });
     }
+    if site == "twitch" {
+        return Err("yt-dlp could not read Twitch cookies from this browser profile.".into());
+    }
     let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)
         .map_err(|e| format!("yt-dlp read cookies but could not confirm a YouTube video: {e}"))?;
     let title = metadata.get("title").and_then(|value| value.as_str()).unwrap_or("YouTube video");
@@ -767,7 +976,7 @@ fn check_cookie_access(browser: &str, profile: Option<&str>) -> Result<serde_jso
     let browser_label = if browser == "librewolf" || browser == "auto" { "MediaBridge LibreWolf".to_string() } else { spec.clone() };
     #[cfg(not(target_os = "linux"))]
     let browser_label = spec.clone();
-    Ok(serde_json::json!({"ok": true, "browser": browser_label, "title": title,
+    Ok(serde_json::json!({"ok": true, "site": "youtube", "browser": browser_label, "title": title,
         "channel_name": account.as_ref().map(|account| account.0.as_str()),
         "channel_avatar_url": account.as_ref().and_then(|account| account.1.as_deref())}))
 }
@@ -811,10 +1020,15 @@ fn media_tool_command(name: &str) -> Command {
     {
         let sibling = env::current_exe().ok().and_then(|exe| exe.parent().map(|p| p.join(format!("{name}.exe"))));
         if let Some(path) = sibling.filter(|path| path.is_file()) {
-            return Command::new(path);
+            let mut command = Command::new(path);
+            windows_hide_console(&mut command);
+            return command;
         }
     }
-    Command::new(name)
+    let mut command = Command::new(name);
+    #[cfg(windows)]
+    windows_hide_console(&mut command);
+    command
 }
 
 fn browser_candidates(browser: &str) -> Vec<String> {
@@ -830,6 +1044,11 @@ fn browser_candidates(browser: &str) -> Vec<String> {
             .map(PathBuf::from)
             .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/bin/mediabridge-librewolf")));
         return launcher.into_iter().map(|path| path.to_string_lossy().into_owned()).collect();
+    }
+    #[cfg(windows)]
+    if executable == "librewolf" {
+        let browser = env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.join("librewolf/librewolf.exe")));
+        return browser.into_iter().map(|path| path.to_string_lossy().into_owned()).collect();
     }
     let mut candidates = match executable.as_str() {
         "chromium" | "chromium-browser" => vec![browser.to_string(), "chromium".into(), "chromium-browser".into()],
@@ -1104,6 +1323,59 @@ fn raise_mpv_window(process_id: u32) {
     }
 }
 
+#[cfg(windows)]
+fn restore_librewolf_window(process_id: u32, display_index: Option<usize>) {
+    use windows_sys::core::BOOL;
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT};
+    use windows_sys::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        BringWindowToTop, EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
+        SetForegroundWindow, SetWindowPos, ShowWindow, HWND_TOP, SWP_NOZORDER,
+        SWP_NOSIZE, SWP_SHOWWINDOW, SW_MAXIMIZE, SW_RESTORE,
+    };
+
+    struct WindowSearch { process_id: u32, window: HWND }
+    unsafe extern "system" fn find_window(hwnd: HWND, parameter: LPARAM) -> BOOL {
+        let search = unsafe { &mut *(parameter as *mut WindowSearch) };
+        let mut owner = 0;
+        unsafe { GetWindowThreadProcessId(hwnd, &mut owner); }
+        if owner == search.process_id && unsafe { IsWindowVisible(hwnd) } != 0 {
+            search.window = hwnd;
+            0
+        } else { 1 }
+    }
+
+    unsafe extern "system" fn collect_monitor(monitor: HMONITOR, _: HDC, _: *mut RECT, parameter: LPARAM) -> BOOL {
+        let monitors = unsafe { &mut *(parameter as *mut Vec<RECT>) };
+        let mut info: MONITORINFO = unsafe { std::mem::zeroed() };
+        info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if unsafe { GetMonitorInfoW(monitor, &mut info) } != 0 { monitors.push(info.rcMonitor); }
+        1
+    }
+
+    let mut monitors: Vec<RECT> = Vec::new();
+    unsafe { EnumDisplayMonitors(std::ptr::null_mut(), std::ptr::null(), Some(collect_monitor), &mut monitors as *mut _ as LPARAM); }
+    for _ in 0..60 {
+        let mut search = WindowSearch { process_id, window: std::ptr::null_mut() };
+        unsafe { EnumWindows(Some(find_window), &mut search as *mut _ as LPARAM); }
+        if !search.window.is_null() {
+            unsafe {
+                ShowWindow(search.window, SW_RESTORE);
+                if let Some(rect) = display_index.and_then(|index| monitors.get(index)) {
+                    SetWindowPos(search.window, HWND_TOP, rect.left, rect.top, 0, 0,
+                        SWP_NOZORDER | SWP_NOSIZE | SWP_SHOWWINDOW);
+                }
+                ShowWindow(search.window, SW_MAXIMIZE);
+                BringWindowToTop(search.window);
+                SetForegroundWindow(search.window);
+            }
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    append_windows_log("Could not find the new LibreWolf window to restore it from a minimized state".into());
+}
+
 fn terminate_child(child: &mut Child) {
     #[cfg(unix)]
     {
@@ -1205,6 +1477,221 @@ fn local_http_json(port: u16, path: &str) -> Result<serde_json::Value, String> {
     let split = response.windows(4).position(|w| w == b"\r\n\r\n")
         .ok_or_else(|| "invalid Chromium DevTools HTTP response".to_string())?;
     serde_json::from_slice(&response[split + 4..]).map_err(|e| format!("invalid Chromium DevTools JSON: {e}"))
+}
+
+#[cfg(windows)]
+fn windows_hide_console(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn librewolf_bidi_session() -> Result<LibreWolfBidi, String> {
+    let (socket, _) = connect("ws://127.0.0.1:9222/session")
+        .map_err(|error| format!("could not connect to LibreWolf BiDi at 127.0.0.1:9222: {error}"))?;
+    if let MaybeTlsStream::Plain(stream) = socket.get_ref() {
+        stream.set_read_timeout(Some(Duration::from_secs(3)))
+            .map_err(|error| format!("could not set a timeout for LibreWolf BiDi: {error}"))?;
+    }
+    let mut bidi = LibreWolfBidi { socket, next_id: 0, context_id: None, cached_at: None,
+        cached_video: None, autoplay_attempted: false, fullscreen_attempted_at: None };
+    bidi.call("session.new", serde_json::json!({"capabilities": {}}))?;
+    Ok(bidi)
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+impl LibreWolfBidi {
+    fn call(&mut self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        let id = self.next_id;
+        let payload = serde_json::json!({"id": id, "method": method, "params": params}).to_string();
+        self.socket.send(Message::Text(payload)).map_err(|error| format!("could not send LibreWolf BiDi command: {error}"))?;
+        loop {
+            let message = self.socket.read().map_err(|error| format!("could not read LibreWolf BiDi response: {error}"))?;
+            if let Message::Text(text) = message {
+                let value: serde_json::Value = serde_json::from_str(&text).map_err(|error| format!("invalid LibreWolf BiDi response: {error}"))?;
+                if value.get("id").and_then(|value| value.as_u64()) != Some(id) { continue; }
+                if value.get("type").and_then(|value| value.as_str()) == Some("error") {
+                    return Err(format!("LibreWolf BiDi rejected {method}: {}", value.get("message").and_then(|value| value.as_str()).unwrap_or("unknown error")));
+                }
+                return Ok(value.get("result").cloned().unwrap_or(serde_json::Value::Null));
+            }
+        }
+    }
+
+    fn context_for(&mut self, url: &str) -> Result<Option<String>, String> {
+        let tree = self.call("browsingContext.getTree", serde_json::json!({"maxDepth": 10}))?;
+        let wanted_video = youtube_video_id(url);
+        let mut contexts = Vec::new();
+        fn collect(node: &serde_json::Value, values: &mut Vec<(String, String, Option<String>)>) {
+            if let (Some(id), Some(url)) = (node.get("context").and_then(|v| v.as_str()), node.get("url").and_then(|v| v.as_str())) {
+                values.push((id.to_string(), url.to_string(), node.get("clientWindow").and_then(|v| v.as_str()).map(str::to_string)));
+            }
+            if let Some(children) = node.get("children").and_then(|v| v.as_array()) {
+                for child in children { collect(child, values); }
+            }
+        }
+        if let Some(roots) = tree.get("contexts").and_then(|value| value.as_array()) {
+            for root in roots { collect(root, &mut contexts); }
+        }
+        let selected = contexts.iter().find(|(_, candidate, _)| {
+            if youtube_url(url) {
+                youtube_url(candidate) && wanted_video.as_ref().is_none_or(|id| youtube_video_id(candidate).as_ref() == Some(id))
+            } else if twitch_url(url) {
+                twitch_url(candidate) && candidate.contains("twitch.tv/")
+            } else { false }
+        }).map(|(id, _, window)| (id.clone(), window.clone()));
+        if let Some((id, window)) = selected.as_ref() {
+            if self.context_id.as_deref() != Some(id.as_str()) {
+                if let Some(window) = window {
+                    // Firefox may ignore page actions while its native window is minimized.
+                    #[cfg(not(windows))]
+                    let _ = self.call("browser.setClientWindowState", serde_json::json!({"clientWindow":window,"state":"normal"}));
+                    #[cfg(windows)]
+                    let _ = window;
+                }
+                let _ = self.call("browsingContext.activate", serde_json::json!({"context":id}));
+                // Keep the browser window normal here. Video fullscreen is
+                // requested from the site's player element during refresh;
+                // fullscreening the browser chrome can leave Firefox minimized
+                // or fullscreen on the wrong monitor.
+                self.fullscreen_attempted_at = None;
+            }
+        }
+        let selected = selected.map(|(id, _)| id);
+        self.context_id = selected.clone();
+        Ok(selected)
+    }
+
+    fn evaluate(&mut self, context: &str, expression: &str) -> Result<serde_json::Value, String> {
+        let result = self.call("script.evaluate", serde_json::json!({
+            "expression": expression, "target": {"context": context}, "awaitPromise": true, "resultOwnership": "none"
+        }))?;
+        if result.get("type").and_then(|value| value.as_str()) == Some("exception") {
+            return Err("LibreWolf could not evaluate the active video page".into());
+        }
+        let remote = result.get("result").ok_or("LibreWolf returned no evaluated video state")?;
+        let value = remote.get("value").and_then(|value| value.as_str()).ok_or("LibreWolf returned an unexpected video state")?;
+        Ok(serde_json::from_str(value).unwrap_or_else(|_| serde_json::Value::String(value.to_string())))
+    }
+
+    fn refresh(&mut self, url: &str) -> Result<Option<LibreWolfVideoState>, String> {
+        if self.cached_at.is_some_and(|at| at.elapsed() < Duration::from_millis(150)) {
+            return Ok(self.cached_video.clone());
+        }
+        let Some(context) = self.context_for(url)? else {
+            self.cached_at = Some(std::time::Instant::now());
+            self.cached_video = None;
+            return Ok(None);
+        };
+        if !self.autoplay_attempted {
+            let result = self.evaluate(&context, "(() => { const v=document.querySelector('video'); if (v && v.paused && !v.ended) v.play().catch(()=>{}); return JSON.stringify({hasVideo:!!v}); })()")?;
+            self.autoplay_attempted = result.get("hasVideo").and_then(|value| value.as_bool()).unwrap_or(false);
+        }
+        const STATE_SCRIPT: &str = r#"(() => {
+          const v=document.querySelector('video');
+          const b=document.querySelector('.ytp-fullscreen-button, [data-a-target="player-fullscreen-button"]');
+          const r=b?.getBoundingClientRect();
+          if (v && !v.__mediabridgeEndHook) {
+            v.__mediabridgeEndHook=true;
+            v.addEventListener('ended',()=>window.__mediabridgeVideoEnded=true,{once:true});
+          }
+          return JSON.stringify({title:document.title,url:location.href,currentTime:v?.currentTime,duration:v?.duration,
+            volume:v?.volume,paused:v?.paused,ended:!!v?.ended || !!window.__mediabridgeVideoEnded,fullscreen:!!document.fullscreenElement,
+            button:r?{x:r.x+r.width/2,y:r.y+r.height/2}:null});
+        })()"#;
+        let value = self.evaluate(&context, STATE_SCRIPT)?;
+        let should_retry_fullscreen = self.fullscreen_attempted_at
+            .is_none_or(|attempt| attempt.elapsed() >= Duration::from_secs(2));
+        if value.get("fullscreen").and_then(|value| value.as_bool()) != Some(true) && should_retry_fullscreen {
+            if let Some(button) = value.get("button") {
+                if let (Some(x), Some(y)) = (button.get("x").and_then(|value| value.as_f64()), button.get("y").and_then(|value| value.as_f64())) {
+                    if self.call("input.performActions", serde_json::json!({"context":context,"actions":[{"type":"pointer","id":"mediabridge-mouse","actions":[{"type":"pointerMove","x":x,"y":y,"duration":250},{"type":"pointerDown","button":0},{"type":"pointerUp","button":0}]}]})).is_ok() {
+                        self.fullscreen_attempted_at = Some(std::time::Instant::now());
+                    }
+                }
+            }
+        }
+        let video = LibreWolfVideoState {
+            title: value.get("title").and_then(|value| value.as_str()).map(str::to_string),
+            current_time: value.get("currentTime").and_then(|value| value.as_f64()),
+            duration: value.get("duration").and_then(|value| value.as_f64()),
+            volume: value.get("volume").and_then(|value| value.as_f64()),
+            paused: value.get("paused").and_then(|value| value.as_bool()),
+            ended: value.get("ended").and_then(|value| value.as_bool()).unwrap_or(false),
+        };
+        self.cached_at = Some(std::time::Instant::now());
+        self.cached_video = Some(video.clone());
+        Ok(Some(video))
+    }
+
+    fn close_playback(&mut self) -> Result<(), String> {
+        if let Some(context) = self.context_id.take() {
+            self.call("browsingContext.close", serde_json::json!({"context":context,"promptUnload":false}))?;
+        }
+        self.cached_at = None;
+        self.cached_video = None;
+        self.autoplay_attempted = false;
+        self.fullscreen_attempted_at = None;
+        Ok(())
+    }
+
+    fn close_browser(&mut self) -> Result<(), String> {
+        self.call("browser.close", serde_json::json!({}))?;
+        self.context_id = None;
+        self.cached_at = None;
+        self.cached_video = None;
+        Ok(())
+    }
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn refresh_librewolf_video(state: &mut State) -> Option<LibreWolfVideoState> {
+    let item = state.current.as_ref().filter(|item| !item.local_playback
+        && item.browser.as_deref().is_some_and(|browser| browser.to_ascii_lowercase().contains("librewolf")))?;
+    let url = item.url.clone();
+    if state.librewolf_bidi.is_none() {
+        if state.librewolf_bidi_retry_at.is_some_and(|retry| retry > std::time::Instant::now()) { return None; }
+        state.librewolf_bidi_retry_at = Some(std::time::Instant::now() + Duration::from_secs(3));
+        match librewolf_bidi_session() {
+            Ok(session) => { state.librewolf_bidi = Some(session); state.librewolf_bidi_retry_at = None; }
+            Err(error) => { eprintln!("LibreWolf playback controls are unavailable: {error}"); return None; }
+        }
+    }
+    match state.librewolf_bidi.as_mut().map(|bidi| bidi.refresh(&url)) {
+        Some(Ok(result)) => result,
+        Some(Err(error)) => {
+            eprintln!("LibreWolf playback controls stopped: {error}");
+            state.librewolf_bidi = None;
+            state.librewolf_bidi_retry_at = Some(std::time::Instant::now() + Duration::from_secs(3));
+            None
+        }
+        None => None,
+    }
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn control_librewolf(state: &mut State, operation: &str, value: Option<f64>) -> Result<(), String> {
+    if refresh_librewolf_video(state).is_none() {
+        return Err("could not find the active LibreWolf video tab; make sure playback uses MediaBridge LibreWolf".into());
+    }
+    let bidi = state.librewolf_bidi.as_mut().ok_or("LibreWolf BiDi session is not active")?;
+    let context = bidi.context_id.clone().ok_or("could not identify the LibreWolf playback tab")?;
+    let expression = match operation {
+        "pause" => "(() => { const v=document.querySelector('video'); if (!v) throw Error('video unavailable'); v.pause(); return 'ok'; })()".to_string(),
+        "resume" => "(() => { const v=document.querySelector('video'); if (!v) throw Error('video unavailable'); v.play(); return 'ok'; })()".to_string(),
+        "play_pause" => "(() => { const v=document.querySelector('video'); if (!v) throw Error('video unavailable'); v.paused?v.play():v.pause(); return 'ok'; })()".to_string(),
+        "rewind" => "(() => { const v=document.querySelector('video'); if (!v) throw Error('video unavailable'); v.currentTime=Math.max(0,v.currentTime-5); return 'ok'; })()".to_string(),
+        "forward" => "(() => { const v=document.querySelector('video'); if (!v) throw Error('video unavailable'); v.currentTime=Math.min(v.duration||Infinity,v.currentTime+5); return 'ok'; })()".to_string(),
+        "seek" => format!("(() => {{ const v=document.querySelector('video'); if (!v) throw Error('video unavailable'); v.currentTime={}; return 'ok'; }})()", value.ok_or("seek position is missing")?),
+        "volume" => format!("(() => {{ const v=document.querySelector('video'); if (!v) throw Error('video unavailable'); v.volume={}; return 'ok'; }})()", value.ok_or("volume is missing")?.clamp(0.0, 1.0)),
+        "volume_up" => "(() => { const v=document.querySelector('video'); if (!v) throw Error('video unavailable'); v.volume=Math.min(1,v.volume+0.05); return 'ok'; })()".to_string(),
+        "volume_down" => "(() => { const v=document.querySelector('video'); if (!v) throw Error('video unavailable'); v.volume=Math.max(0,v.volume-0.05); return 'ok'; })()".to_string(),
+        _ => return Err(format!("invalid browser control operation '{operation}'")),
+    };
+    let _ = bidi.evaluate(&context, &expression)?;
+    bidi.cached_at = None;
+    Ok(())
 }
 
 fn cdp_call(socket: &mut WebSocket<MaybeTlsStream<TcpStream>>, id: u64, method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
@@ -1708,7 +2195,7 @@ fn start_url(state: &mut State, cfg: &Config, mut item: QueueItem) -> Result<(),
                     "--new-window".into(),
                     "--autoplay-policy=no-user-gesture-required".into(),
                 ],
-                "firefox" | "librewolf" | "mediabridge-librewolf" => vec!["--kiosk".into(), "--new-window".into()],
+                "firefox" | "librewolf" | "mediabridge-librewolf" => vec!["--new-window".into()],
                 _ => Vec::new(),
             }
         } else { Vec::new() };
@@ -1721,6 +2208,18 @@ fn start_url(state: &mut State, cfg: &Config, mut item: QueueItem) -> Result<(),
                 Some(chromium_profile()?)
             } else { None };
             let mut launch_args = args.clone();
+            #[cfg(windows)]
+            if candidate.to_ascii_lowercase().ends_with("librewolf.exe") {
+                let requested_url = launch_args.iter().position(|argument| argument == &item.url)
+                    .map(|index| launch_args.remove(index));
+                let profile = managed_librewolf_profile()
+                    .ok_or("could not locate the persistent MediaBridge LibreWolf profile")?;
+                ensure_librewolf_profile(&profile)?;
+                launch_args.push("--profile".into());
+                launch_args.push(profile.to_string_lossy().into_owned());
+                launch_args.push("--remote-debugging-port=9222".into());
+                if let Some(url) = requested_url { launch_args.push(url); }
+            }
             if let Some(profile) = profile.as_ref() {
                 launch_args.push(format!("--user-data-dir={}", profile.display()));
                 launch_args.push("--remote-debugging-address=127.0.0.1".into());
@@ -1734,6 +2233,12 @@ fn start_url(state: &mut State, cfg: &Config, mut item: QueueItem) -> Result<(),
             isolate_process_group(&mut command);
             match command.spawn() {
                 Ok(child) => {
+                    #[cfg(windows)]
+                    if candidate.to_ascii_lowercase().ends_with("librewolf.exe") {
+                        let process_id = child.id();
+                        let display = item.screen.or(preferences.default_screen).map(usize::from);
+                        thread::spawn(move || restore_librewolf_window(process_id, display));
+                    }
                     println!("Launched browser '{}' for {}", candidate, safe_media_url(&item.url));
                     if let Some(profile) = profile.as_ref() {
                         println!("Waiting for Chromium DevTools on 127.0.0.1:{}", chromium_debug_port(profile)?);
@@ -1762,7 +2267,16 @@ fn start_url(state: &mut State, cfg: &Config, mut item: QueueItem) -> Result<(),
             Err(error) => eprintln!("could not wait for the default browser launcher: {error}"),
         });
     }
-    state.player = child.take();
+    #[cfg(any(windows, target_os = "linux"))]
+    let player_child = if item.browser.as_deref().is_some_and(|browser| browser.to_ascii_lowercase().contains("librewolf")) {
+        // LibreWolf forwards URLs to its existing single-instance process and
+        // exits. That short-lived launcher is not the lifetime of playback.
+        drop(child.take());
+        None
+    } else { child.take() };
+    #[cfg(not(any(windows, target_os = "linux")))]
+    let player_child = child.take();
+    state.player = player_child;
     state.mpv_socket = mpv_socket;
     state.current = Some(item);
     if let Some(profile) = automation_profile {
@@ -1795,6 +2309,19 @@ fn start_url(state: &mut State, cfg: &Config, mut item: QueueItem) -> Result<(),
 fn advance(state: &mut State, cfg: &Config) {
     drain_player_errors(state);
     drain_metadata(state);
+    #[cfg(any(windows, target_os = "linux"))]
+    {
+        let ended = refresh_librewolf_video(state).is_some_and(|video| video.ended);
+        if ended {
+            if let Some(item) = state.current.take() { push_history(state, item); }
+            if let Some(bidi) = state.librewolf_bidi.as_mut() { let _ = bidi.close_playback(); }
+            if let Some(item) = state.queue.pop_front() {
+                if let Err(error) = start_url(state, cfg, item.clone()) {
+                    eprintln!("failed to start queued URL {}: {error}", safe_media_url(&item.url));
+                }
+            }
+        }
+    }
     loop {
         let ended = match state.player.as_mut() {
             Some(child) => match child.try_wait() { Ok(Some(_)) => true, Ok(None) => false, Err(_) => true },
@@ -1818,8 +2345,50 @@ fn push_history(state: &mut State, item: QueueItem) {
     while state.history.len() > 50 { state.history.pop_front(); }
 }
 
-fn stop_current(state: &mut State) {
-    if let Some(item) = state.current.as_ref().filter(|item| !item.local_playback) {
+fn stop_current(state: &mut State) -> Result<(), String> {
+    let mut close_error = None;
+    let mut librewolf_closed = false;
+    #[cfg(any(windows, target_os = "linux"))]
+    if let Some(item) = state.current.as_ref().filter(|item| !item.local_playback && item.browser.as_deref().is_some_and(|browser| browser.to_ascii_lowercase().contains("librewolf"))) {
+        let url = item.url.clone();
+        if state.librewolf_bidi.is_none() {
+            match librewolf_bidi_session() {
+                Ok(session) => state.librewolf_bidi = Some(session),
+                Err(error) => close_error = Some(error),
+            }
+        }
+        if let Some(bidi) = state.librewolf_bidi.as_mut() {
+            if bidi.context_id.is_none() {
+                match bidi.context_for(&url) {
+                    Ok(Some(_)) => {},
+                    Ok(None) => close_error = Some("the video tab could not be identified".into()),
+                    Err(error) => close_error = Some(error),
+                }
+            }
+            match bidi.close_browser() {
+                Ok(()) => librewolf_closed = true,
+                Err(error) => close_error = Some(error),
+            }
+        } else {
+            eprintln!("Could not connect to the managed LibreWolf session to close the browser");
+        }
+    }
+    #[cfg(any(windows, target_os = "linux"))]
+    if state.current.is_none() {
+        if let Some(bidi) = state.librewolf_bidi.as_mut() {
+            match bidi.close_browser() {
+                Ok(()) => librewolf_closed = true,
+                Err(error) => close_error = Some(error),
+            }
+        } else if let Ok(mut bidi) = librewolf_bidi_session() {
+            match bidi.close_browser() {
+                Ok(()) => librewolf_closed = true,
+                Err(error) => close_error = Some(error),
+            }
+        }
+    }
+    if librewolf_closed { state.librewolf_bidi = None; }
+    if let Some(item) = state.current.as_ref().filter(|item| !item.local_playback && !item.browser.as_deref().is_some_and(|browser| browser.to_ascii_lowercase().contains("librewolf"))) {
         if let Some(player) = browser_player(item.browser.as_deref()) {
             if let Err(error) = run_playerctl(&player, &["quit"]) { eprintln!("Browser MPRIS quit request failed: {error}"); }
         }
@@ -1827,6 +2396,7 @@ fn stop_current(state: &mut State) {
     if let Some(mut child) = state.player.take() { terminate_child(&mut child); }
     if let Some(socket) = state.mpv_socket.take() { let _ = std::fs::remove_file(socket); }
     state.current = None;
+    close_error.map_or(Ok(()), Err)
 }
 
 fn respond(request: Request, status: u16, body: String, content_type: &str) {
@@ -1865,6 +2435,20 @@ fn open_url_default(url: &str) -> Result<Child, String> {
         .spawn().map_err(|e| format!("could not open URL with the Windows default browser: {e}"))
 }
 
+#[cfg(windows)]
+fn open_dashboard_in_librewolf(url: &str) -> Result<Child, String> {
+    let install_dir = env::current_exe().map_err(|error| format!("could not locate MediaBridge's install directory: {error}"))?
+        .parent().ok_or("could not locate MediaBridge's install directory")?.to_path_buf();
+    let browser = install_dir.join("librewolf").join("librewolf.exe");
+    if !browser.is_file() { return Err(format!("bundled LibreWolf was not found at {}", browser.display())); }
+    let profile = managed_librewolf_profile()
+        .ok_or("could not locate the MediaBridge LibreWolf profile")?;
+    ensure_librewolf_profile(&profile)?;
+    Command::new(browser).arg("--profile").arg(profile).arg("--remote-debugging-port=9222").arg(url)
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+        .spawn().map_err(|error| format!("could not open the dashboard in bundled LibreWolf: {error}"))
+}
+
 #[cfg(not(windows))]
 fn open_url_default(url: &str) -> Result<Child, String> {
     Command::new("xdg-open").arg(url).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
@@ -1892,7 +2476,7 @@ fn mpv_socket_path() -> PathBuf {
 
 #[cfg(windows)]
 fn mpv_socket_path() -> PathBuf {
-    PathBuf::from(format!(r"\.pipemediabridge-mpv-{}", std::process::id()))
+    PathBuf::from(format!(r"\\.\pipe\mediabridge-mpv-{}", std::process::id()))
 }
 
 #[cfg(unix)]
@@ -1961,10 +2545,39 @@ fn control_mpv(state: &State, operation: &str, value: Option<f64>) -> Result<(),
     mpv_ipc(path, command).map(|_| ())
 }
 
-fn control_media(state: &State, operation: &str, value: Option<f64>) -> Result<(), String> {
+fn control_media(state: &mut State, operation: &str, value: Option<f64>) -> Result<(), String> {
     if state.current.as_ref().is_some_and(|item| item.local_playback) {
         return control_mpv(state, operation, value);
     }
+    #[cfg(windows)]
+    {
+        if state.current.as_ref().is_none_or(|item| item.local_playback) {
+            return Err("no active LibreWolf browser playback to control".into());
+        }
+        if state.current.as_ref().and_then(|item| item.browser.as_deref())
+            .is_some_and(|browser| browser.to_ascii_lowercase().contains("librewolf")) {
+            return control_librewolf(state, operation, value);
+        }
+        let twitch = state.current.as_ref().is_some_and(|item| twitch_url(&item.url));
+        let key = match operation {
+            "pause" | "resume" | "play_pause" => if twitch { 0x20 } else { 0x4B }, // Twitch uses Space; YouTube uses K.
+            "rewind" => 0x25, // Left arrow: five seconds in the YouTube player.
+            "forward" => 0x27, // Right arrow: five seconds in the YouTube player.
+            "volume_up" => 0x26,
+            "volume_down" => 0x28,
+            "seek" | "volume" => return Err("absolute seek and volume controls are unavailable in browser playback on Windows; use Direct player for those controls".into()),
+            _ => return Err(format!("invalid browser control operation '{operation}'")),
+        };
+        let _ = value;
+        return send_windows_browser_key(key);
+    }
+    #[cfg(target_os = "linux")]
+    if state.current.as_ref().and_then(|item| item.browser.as_deref())
+        .is_some_and(|browser| browser.to_ascii_lowercase().contains("librewolf")) {
+        return control_librewolf(state, operation, value);
+    }
+    #[cfg(not(windows))]
+    {
     let player = controlled_player(state)?;
     let result = match operation {
         "pause" => run_playerctl(&player, &["pause"]),
@@ -1979,6 +2592,21 @@ fn control_media(state: &State, operation: &str, value: Option<f64>) -> Result<(
         _ => return Err(format!("invalid media control operation '{operation}'")),
     };
     result.map(|_| ())
+    }
+}
+
+#[cfg(windows)]
+fn send_windows_browser_key(key: u16) -> Result<(), String> {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP};
+    let input = |flags| INPUT { r#type: INPUT_KEYBOARD, Anonymous: INPUT_0 { ki: KEYBDINPUT {
+        wVk: key, wScan: 0, dwFlags: flags, time: 0, dwExtraInfo: 0,
+    } } };
+    let inputs = [input(0), input(KEYEVENTF_KEYUP)];
+    let sent = unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32) };
+    if sent != inputs.len() as u32 {
+        return Err(format!("Windows did not send the browser media control: {}", std::io::Error::last_os_error()));
+    }
+    Ok(())
 }
 
 fn run_mouse(request: MouseRequest) -> Result<(), String> {
@@ -2151,7 +2779,9 @@ fn browser_player(browser_arg: Option<&str>) -> Option<String> {
     })
 }
 
-fn media_status(state: &State) -> Status {
+fn media_status(state: &mut State) -> Status {
+    #[cfg(any(windows, target_os = "linux"))]
+    let bidi_video = refresh_librewolf_video(state);
     if state.current.as_ref().is_some_and(|item| item.local_playback) {
         if let Some(socket) = state.mpv_socket.as_deref() {
             let title = mpv_property(socket, "media-title").and_then(|v| v.as_str().map(str::to_string));
@@ -2185,8 +2815,16 @@ fn media_status(state: &State) -> Status {
         Some((opt_text(fields[0]), opt_text(fields[1]), opt_text(fields[2]), opt_text(fields[3]),
               opt_text(fields[5]), seconds(fields[4]), seconds(fields[6]), fields[7].parse::<f64>().ok(), fields[8].to_lowercase()))
     });
-    let (mut title, mut artist, album, artwork_url, media_url, duration_seconds, position_seconds, volume, mpris_state) =
+    let (mut title, mut artist, album, artwork_url, media_url, mut duration_seconds, mut position_seconds, mut volume, mut mpris_state) =
         media.unwrap_or((None, None, None, None, None, None, None, None, String::new()));
+    #[cfg(any(windows, target_os = "linux"))]
+    if let Some(video) = bidi_video {
+        title = video.title.or(title);
+        duration_seconds = video.duration.or(duration_seconds);
+        position_seconds = video.current_time.or(position_seconds);
+        volume = video.volume.or(volume);
+        mpris_state = match video.paused { Some(true) => "paused", Some(false) => "playing", None => "unknown" }.into();
+    }
     if let Some(current) = state.current.as_ref() {
         if title.is_none() { title = current.title.clone(); }
         if artist.is_none() { artist = current.uploader.clone(); }
@@ -2194,6 +2832,7 @@ fn media_status(state: &State) -> Status {
     let artwork_url = artwork_url.or_else(|| state.current.as_ref().and_then(|item| item.thumbnail_url.clone()));
     let playback_state = if !mpris_state.is_empty() { mpris_state }
         else if state.mirror.is_some() { "mirroring".into() }
+        else if cfg!(windows) && state.current.as_ref().is_some_and(|item| !item.local_playback) { "browser session (state unavailable)".into() }
         else if state.current.is_some() { "unknown".into() }
         else { "idle".into() };
     Status {
@@ -2208,6 +2847,7 @@ fn media_status(state: &State) -> Status {
     }
 }
 
+#[cfg(not(windows))]
 fn controlled_player(state: &State) -> Result<String, String> {
     let browser = state.current.as_ref().and_then(|item| item.browser.as_deref());
     browser_player(browser).ok_or_else(|| "no browser MPRIS player found; start playback in the active desktop session".into())
@@ -2249,10 +2889,13 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         if !matches!(parsed.cookies_browser.as_str(), "auto" | "librewolf" | "chrome" | "chromium" | "edge" | "firefox" | "brave" | "opera" | "vivaldi" | "whale") {
             respond(request, 400, "{\"error\":\"choose a supported browser to check cookie access\"}".into(), "application/json"); return;
         }
+        if !matches!(parsed.site.as_str(), "youtube" | "twitch") {
+            respond(request, 400, "{\"error\":\"choose YouTube or Twitch to check account cookies\"}".into(), "application/json"); return;
+        }
         if parsed.cookies_profile.as_deref().is_some_and(|profile| profile.contains(',') || profile.contains('\n') || profile.contains('\r')) {
             respond(request, 400, "{\"error\":\"browser profile must not contain commas or line breaks\"}".into(), "application/json"); return;
         }
-        match check_cookie_access(&parsed.cookies_browser, parsed.cookies_profile.as_deref()) {
+        match check_cookie_access(&parsed.cookies_browser, parsed.cookies_profile.as_deref(), &parsed.site) {
             Ok(result) => respond(request, 200, json(&result), "application/json"),
             Err(error) => respond(request, 422, json(&serde_json::json!({"error": error})), "application/json"),
         }
@@ -2420,10 +3063,7 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
             respond(request, 400, "{\"error\":\"a YouTube playlist link with a list parameter is required\"}".into(), "application/json"); return;
         }
         if parsed.screen.or(current_playback_preferences(cfg).default_screen).is_some_and(|screen| screen > 32) {
-            respond(request, 400, "{\"error\":\"screen must be an mpv display index from 0 to 32\"}".into(), "application/json"); return;
-        }
-        if parsed.screen.is_some() && !parsed.local_playback {
-            respond(request, 400, "{\"error\":\"screen selection is only supported for local mpv playback\"}".into(), "application/json"); return;
+            respond(request, 400, "{\"error\":\"display index must be from 0 to 32\"}".into(), "application/json"); return;
         }
         parsed.browser = parsed.browser.map(|b| b.trim().to_string()).filter(|b| !b.is_empty());
         let urls = match expand_youtube_playlist(&parsed.url) {
@@ -2437,7 +3077,7 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
             state.playback_error = None;
             if let Some(current) = state.current.clone() { push_history(state, current); }
             state.queue.clear();
-            stop_current(state);
+            let _ = stop_current(state);
             let first = items.remove(0);
             if let Err(e) = start_url(state, cfg, first) { respond(request, 500, json(&serde_json::json!({"error": e})), "application/json"); return; }
             state.queue.extend(items);
@@ -2457,10 +3097,7 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         if request.as_reader().read_to_string(&mut body).is_err() { respond(request, 400, "{\"error\":\"invalid body\"}".into(), "application/json"); return; }
         let mut parsed: QueueItem = match serde_json::from_str(&body) { Ok(v) => v, Err(e) => { respond(request, 400, json(&serde_json::json!({"error": e.to_string()})), "application/json"); return; } };
         if parsed.screen.or(current_playback_preferences(cfg).default_screen).is_some_and(|screen| screen > 32) {
-            respond(request, 400, "{\"error\":\"screen must be an mpv display index from 0 to 32\"}".into(), "application/json"); return;
-        }
-        if parsed.screen.is_some() && !parsed.local_playback {
-            respond(request, 400, "{\"error\":\"screen selection is only supported for local mpv playback\"}".into(), "application/json"); return;
+            respond(request, 400, "{\"error\":\"display index must be from 0 to 32\"}".into(), "application/json"); return;
         }
         parsed.url = match clean_media_url(&parsed.url, parsed.local_playback) { Ok(url) => url, Err(e) => { respond(request, 400, json(&serde_json::json!({"error": e})), "application/json"); return; } };
         if parsed.url.starts_with("smb://") && !parsed.local_playback { respond(request, 400, "{\"error\":\"SMB links require local mpv playback\"}".into(), "application/json"); return; }
@@ -2474,7 +3111,7 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
                 if let Some(current) = state.current.clone() { push_history(state, current); }
                 state.queue.clear();
             }
-            stop_current(state);
+            let _ = stop_current(state);
             if let Err(e) = start_url(state, cfg, parsed) { respond(request, 500, json(&serde_json::json!({"error": e})), "application/json"); return; }
         }
         respond(request, 202, "{\"ok\":true}".into(), "application/json"); return;
@@ -2497,11 +3134,15 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
     if method == Method::Post && path == "/close" {
         state.playback_epoch = state.playback_epoch.wrapping_add(1);
         state.playback_error = None;
-        stop_current(state);
+        let close_result = stop_current(state);
         if let Some(mut child) = state.mirror.take() { let _ = child.kill(); let _ = child.wait(); }
         state.queue.clear();
         state.history.clear();
-        respond(request, 200, "{\"ok\":true}".into(), "application/json"); return;
+        match close_result {
+            Ok(()) => respond(request, 200, "{\"ok\":true}".into(), "application/json"),
+            Err(error) => respond(request, 409, json(&serde_json::json!({"error": format!("playback state was cleared but LibreWolf did not confirm it closed: {error}")})), "application/json"),
+        }
+        return;
     }
     if method == Method::Post && ["/pause", "/resume", "/play_pause", "/rewind", "/forward", "/volume_up", "/volume_down"].contains(&path.as_str()) {
         let result = match path.as_str() {
@@ -2548,7 +3189,7 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         if let Some(current) = state.current.clone() { state.queue.push_front(current); }
         state.playback_epoch = state.playback_epoch.wrapping_add(1);
         state.playback_error = None;
-        stop_current(state);
+        let _ = stop_current(state);
         match start_url(state, cfg, previous) {
             Ok(()) => respond(request, 202, "{\"ok\":true}".into(), "application/json"),
             Err(e) => respond(request, 500, json(&serde_json::json!({"error": e})), "application/json"),
@@ -2563,11 +3204,39 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         if let Some(current) = state.current.clone() { push_history(state, current); }
         state.playback_epoch = state.playback_epoch.wrapping_add(1);
         state.playback_error = None;
-        stop_current(state);
+        let _ = stop_current(state);
         match start_url(state, cfg, next) {
             Ok(()) => respond(request, 202, "{\"ok\":true}".into(), "application/json"),
             Err(e) => respond(request, 500, json(&serde_json::json!({"error": e})), "application/json"),
         }
+        return;
+    }
+    if method == Method::Get && path == "/sunshine/pair/status" {
+        let status = moonlight_pair_status(state);
+        respond(request, 200, json(&status), "application/json");
+        return;
+    }
+    if method == Method::Post && path == "/sunshine/pair" {
+        let mut body = String::new();
+        if request.as_reader().read_to_string(&mut body).is_err() { respond(request, 400, "{\"error\":\"invalid body\"}".into(), "application/json"); return; }
+        let parsed: MirrorRequest = match serde_json::from_str(&body) { Ok(v) => v, Err(e) => { respond(request, 400, json(&serde_json::json!({"error": e.to_string()})), "application/json"); return; } };
+        let host = parsed.host.trim();
+        if host.is_empty() || host.len() > 253 || host.chars().any(char::is_control) {
+            respond(request, 400, "{\"error\":\"enter a valid Sunshine host name or IP address\"}".into(), "application/json"); return;
+        }
+        if state.moonlight_pairing.is_some() {
+            let status = moonlight_pair_status(state);
+            if status["state"] == "waiting" {
+                respond(request, 409, json(&serde_json::json!({"error":"Moonlight pairing is already in progress"})), "application/json"); return;
+            }
+        }
+        let child = match moonlight_command(cfg).arg("pair").arg(host).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+            Ok(child) => child,
+            Err(error) => { respond(request, 500, json(&serde_json::json!({"error":format!("could not start Moonlight pairing with '{}': {error}", cfg.moonlight)})), "application/json"); return; }
+        };
+        state.moonlight_pair_result = None;
+        state.moonlight_pairing = Some(MoonlightPairing { host: host.to_string(), executable: cfg.moonlight.clone(), child, verifying: false });
+        respond(request, 202, json(&serde_json::json!({"ok":true, "host":host})), "application/json");
         return;
     }
     if method == Method::Post && path == "/sunshine" {
@@ -2583,10 +3252,10 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         if !template.iter().any(|a| a.contains("{app}")) { args.push(parsed.app); }
         state.playback_epoch = state.playback_epoch.wrapping_add(1);
         state.playback_error = None;
-        stop_current(state);
+        let _ = stop_current(state);
         state.queue.clear();
         if let Some(mut child) = state.mirror.take() { let _ = child.kill(); let _ = child.wait(); }
-        match Command::new(&cfg.moonlight).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+        match moonlight_command(cfg).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
             Ok(child) => { state.mirror = Some(child); respond(request, 202, "{\"ok\":true}".into(), "application/json"); }
             Err(e) => respond(request, 500, json(&serde_json::json!({"error": format!("could not start Moonlight '{}': {e}", cfg.moonlight)})), "application/json"),
         }
@@ -2655,7 +3324,7 @@ fn run_server(cfg: Config, shutdown: Option<Arc<AtomicBool>>) -> Result<Option<S
     }
     let restart_bind = state.restart_bind.take();
     drop(server);
-    stop_current(&mut state);
+    let _ = stop_current(&mut state);
     if let Some(mut child) = state.mirror.take() { terminate_child(&mut child); }
     Ok(restart_bind)
 }
@@ -2871,7 +3540,7 @@ struct WindowsTrayApp {
 #[cfg(windows)]
 impl WindowsTrayApp {
     fn open_dashboard(&mut self) {
-        if let Err(error) = open_url_default(&self.dashboard_url) {
+        if let Err(error) = open_dashboard_in_librewolf(&self.dashboard_url) {
             append_windows_log(format!("Could not open dashboard at {}: {error}", self.dashboard_url));
         }
     }

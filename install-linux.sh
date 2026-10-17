@@ -3,7 +3,7 @@ set -euo pipefail
 
 # User-facing installer for common glibc Linux distributions. It installs
 # runtime dependencies with the host package manager and installs MediaBridge
-# and LibreWolf entirely inside the current user's home directory.
+# LibreWolf and Moonlight entirely inside the current user's home directory.
 REPOSITORY="murasaki-dev/mediabridge"
 APP_ASSET="mediabridge-linux-x86_64.tar.gz"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -163,6 +163,39 @@ if [[ ! -x "$TMP_DIR/mediabridge/mediabridge" ]]; then
   exit 1
 fi
 
+# Install Moonlight's official x86_64 AppImage privately with MediaBridge.
+# Extract it so launching Moonlight does not depend on AppImage/FUSE support.
+MOONLIGHT_RELEASE="$TMP_DIR/moonlight-release.json"
+curl --fail --location --silent --show-error \
+  -H 'Accept: application/vnd.github+json' -H 'User-Agent: MediaBridge-Linux-Installer' \
+  https://api.github.com/repos/moonlight-stream/moonlight-qt/releases/latest \
+  --output "$MOONLIGHT_RELEASE"
+MOONLIGHT_METADATA="$TMP_DIR/moonlight-metadata"
+python3 - "$MOONLIGHT_RELEASE" "$MOONLIGHT_METADATA" <<'PY'
+import json, re, sys
+release = json.load(open(sys.argv[1], encoding="utf-8"))
+assets = [a for a in release.get("assets", []) if re.fullmatch(r"Moonlight-.+-x86_64\.AppImage", a.get("name", ""))]
+if not assets:
+    raise SystemExit("Could not find the official x86_64 Moonlight AppImage in the latest release.")
+asset = assets[0]
+with open(sys.argv[2], "w", encoding="utf-8") as out:
+    out.write(release.get("tag_name", "current") + "\n" + asset["browser_download_url"] + "\n")
+PY
+MOONLIGHT_VERSION="$(sed -n '1p' "$MOONLIGHT_METADATA" | tr -cd '[:alnum:]._-')"
+MOONLIGHT_URL="$(sed -n '2p' "$MOONLIGHT_METADATA")"
+MOONLIGHT_FILE="$TMP_DIR/moonlight.AppImage"
+curl --fail --location --silent --show-error "$MOONLIGHT_URL" --output "$MOONLIGHT_FILE"
+chmod +x "$MOONLIGHT_FILE"
+mkdir -p "$TMP_DIR/moonlight-extract"
+if ! (cd "$TMP_DIR/moonlight-extract" && "$MOONLIGHT_FILE" --appimage-extract >/dev/null); then
+  echo "Could not extract the Moonlight AppImage. Check that this distribution provides a compatible glibc environment." >&2
+  exit 1
+fi
+if [[ ! -x "$TMP_DIR/moonlight-extract/squashfs-root/AppRun" ]]; then
+  echo "Moonlight's AppImage did not contain its AppRun launcher." >&2
+  exit 1
+fi
+
 # LibreWolf's official cross-distro AppImage includes uBlock Origin. Download
 # the current stable link from LibreWolf's official installation page.
 LIBREWOLF_PAGE="$TMP_DIR/librewolf-installation.html"
@@ -186,6 +219,14 @@ if [[ ! -x "$TMP_DIR/librewolf-extract/squashfs-root/AppRun" ]]; then
 fi
 
 mkdir -p "$APP_DIR" "$BIN_DIR" "$CONFIG_DIR" "$STATE_DIR" "$DESKTOP_DIR" "$SYSTEMD_DIR"
+if [[ -f "$SCRIPT_DIR/uninstall-linux.sh" ]]; then
+  install -m 755 "$SCRIPT_DIR/uninstall-linux.sh" "$BIN_DIR/mediabridge-uninstall"
+else
+  curl --fail --location --silent --show-error \
+    "https://raw.githubusercontent.com/$REPOSITORY/main/uninstall-linux.sh" \
+    --output "$BIN_DIR/mediabridge-uninstall"
+  chmod 755 "$BIN_DIR/mediabridge-uninstall"
+fi
 VERSION="$(basename "$LIBREWOLF_URL" | sed -E 's/^librewolf-([0-9.]+-[0-9]+)-linux-x86_64-appimage\.AppImage$/\1/')"
 if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?-[0-9]+$ ]]; then VERSION="current"; fi
 LW_STAGING="$APP_DIR/.librewolf-stage-$$"
@@ -198,6 +239,17 @@ fi
 rm -rf "$LW_STAGING"
 ln -sfn "librewolf-$VERSION" "$APP_DIR/.librewolf-current-$$"
 mv -Tf "$APP_DIR/.librewolf-current-$$" "$APP_DIR/librewolf-current"
+
+MOONLIGHT_STAGING="$APP_DIR/.moonlight-stage-$$"
+rm -rf "$MOONLIGHT_STAGING"
+mkdir -p "$MOONLIGHT_STAGING"
+cp -a "$TMP_DIR/moonlight-extract/squashfs-root" "$MOONLIGHT_STAGING/squashfs-root"
+if [[ ! -d "$APP_DIR/moonlight-$MOONLIGHT_VERSION" ]]; then
+  mv "$MOONLIGHT_STAGING/squashfs-root" "$APP_DIR/moonlight-$MOONLIGHT_VERSION"
+fi
+rm -rf "$MOONLIGHT_STAGING"
+ln -sfn "moonlight-$MOONLIGHT_VERSION" "$APP_DIR/.moonlight-current-$$"
+mv -Tf "$APP_DIR/.moonlight-current-$$" "$APP_DIR/moonlight-current"
 
 install -m 755 "$TMP_DIR/mediabridge/mediabridge" "$APP_DIR/mediabridge"
 cat > "$BIN_DIR/mediabridge-librewolf" <<EOF
@@ -217,7 +269,12 @@ if [[ ! -f "\$BROWSER_HOME/.librewolf/librewolf.overrides.cfg" ]]; then
 pref("privacy.clearOnShutdown.cookies", false);
 pref("privacy.clearOnShutdown_v2.cookiesAndStorage", false);
 pref("privacy.sanitize.sanitizeOnShutdown", false);
+pref("media.autoplay.default", 0);
+pref("media.autoplay.blocking_policy", 0);
 PREFS
+fi
+if ! grep -q 'media.autoplay.default' "\$BROWSER_HOME/.librewolf/librewolf.overrides.cfg"; then
+  printf '\npref("media.autoplay.default", 0);\npref("media.autoplay.blocking_policy", 0);\n' >> "\$BROWSER_HOME/.librewolf/librewolf.overrides.cfg"
 fi
 mkdir -p "\$PROFILE"
 if [[ ! -f "\$PROFILE/user.js" ]]; then
@@ -230,11 +287,29 @@ user_pref("privacy.clearOnShutdown_v2.cookiesAndStorage", false);
 user_pref("privacy.clearOnShutdown_v2.historyFormDataAndDownloads", false);
 user_pref("privacy.clearOnShutdown_v2.siteSettings", false);
 user_pref("privacy.sanitize.sanitizeOnShutdown", false);
+user_pref("media.autoplay.default", 0);
+user_pref("media.autoplay.blocking_policy", 0);
+user_pref("browser.aboutwelcome.enabled", false);
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("browser.startup.firstrunSkipsHomepage", true);
+user_pref("security.insecure_connection_text.enabled", false);
 PREFS
+fi
+for pref in \
+  'browser.aboutwelcome.enabled", false' \
+  'browser.shell.checkDefaultBrowser", false' \
+  'browser.startup.firstrunSkipsHomepage", true' \
+  'security.insecure_connection_text.enabled", false'; do
+  if ! grep -q "$pref" "\$PROFILE/user.js"; then
+    printf 'user_pref("%s);\n' "$pref" >> "\$PROFILE/user.js"
+  fi
+done
+if ! grep -q 'media.autoplay.default' "\$PROFILE/user.js"; then
+  printf '\nuser_pref("media.autoplay.default", 0);\nuser_pref("media.autoplay.blocking_policy", 0);\n' >> "\$PROFILE/user.js"
 fi
 export HOME="\$BROWSER_HOME"
 unset XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME
-exec "\$APP_DIR/librewolf-current/squashfs-root/AppRun" --profile "\$PROFILE" "\$@"
+exec "\$APP_DIR/librewolf-current/squashfs-root/AppRun" --profile "\$PROFILE" --remote-debugging-port=9222 "\$@"
 EOF
 chmod 755 "$BIN_DIR/mediabridge-librewolf"
 
@@ -329,3 +404,9 @@ else
 fi
 echo "LibreWolf profile and YouTube cookies persist in: $APP_DIR/librewolf-profile"
 echo "MediaBridge logs: $STATE_DIR/mediabridge.log"
+if [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
+  # Open the onboarding dashboard in the managed browser. The dashboard lets
+  # the user open each supported sign-in page and verify cookie access.
+  "$BIN_DIR/mediabridge-dashboard" >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+fi

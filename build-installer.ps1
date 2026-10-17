@@ -94,6 +94,23 @@ if (-not $mpvExe) { throw 'The downloaded mpv archive did not contain mpv.exe.' 
 Get-ChildItem -LiteralPath $mpvExe.Directory.FullName -Force | Copy-Item -Destination $stage -Recurse -Force
 Remove-Item -LiteralPath $mpvExtract -Recurse -Force
 
+Write-Host 'Downloading the official Moonlight portable client...'
+$moonlightRelease = Invoke-RestMethod -Headers $headers -Uri 'https://api.github.com/repos/moonlight-stream/moonlight-qt/releases/latest'
+$moonlightAsset = $moonlightRelease.assets | Where-Object { $_.name -match '^MoonlightPortable-x64-.+\.zip$' } | Select-Object -First 1
+if (-not $moonlightAsset) { throw 'Could not find the official x64 Moonlight portable ZIP in the latest release.' }
+$moonlightArchive = Join-Path $dist $moonlightAsset.name
+Invoke-WebRequest -Headers $headers -Uri $moonlightAsset.browser_download_url -OutFile $moonlightArchive
+$moonlightExtract = Join-Path $dist 'moonlight-extract'
+if (Test-Path -LiteralPath $moonlightExtract) { Remove-Item -LiteralPath $moonlightExtract -Recurse -Force }
+Expand-Archive -LiteralPath $moonlightArchive -DestinationPath $moonlightExtract -Force
+$moonlightExe = Get-ChildItem -LiteralPath $moonlightExtract -Filter 'Moonlight.exe' -File -Recurse | Select-Object -First 1
+if (-not $moonlightExe) { throw 'The official Moonlight portable archive did not contain Moonlight.exe.' }
+$moonlightPackage = Join-Path $stage 'moonlight'
+New-Item -ItemType Directory -Path $moonlightPackage -Force | Out-Null
+Get-ChildItem -LiteralPath $moonlightExe.Directory.FullName -Force | Copy-Item -Destination $moonlightPackage -Recurse -Force
+Remove-Item -LiteralPath (Join-Path $moonlightPackage 'portable.dat') -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $moonlightExtract -Recurse -Force
+
 Write-Host 'Downloading yt-dlp...'
 Invoke-WebRequest -Headers $headers -Uri 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe' -OutFile (Join-Path $stage 'yt-dlp.exe')
 
@@ -107,6 +124,56 @@ $denoExe = Get-ChildItem -LiteralPath $denoExtract -Filter 'deno.exe' -File -Rec
 if (-not $denoExe) { throw 'The downloaded Deno archive did not contain deno.exe.' }
 Copy-Item -LiteralPath $denoExe.FullName -Destination (Join-Path $stage 'deno.exe')
 Remove-Item -LiteralPath $denoExtract -Recurse -Force
+
+Write-Host 'Downloading the official LibreWolf portable browser...'
+$librewolfPage = Invoke-WebRequest -Headers $headers -Uri 'https://librewolf.net/installation/windows/'
+$librewolfMatch = [regex]::Match($librewolfPage.Content, 'https://[^"''<> ]*librewolf-[^"''<> ]+-windows-x86_64-portable\.zip')
+if (-not $librewolfMatch.Success) { throw 'Could not find the official x86_64 LibreWolf portable download on its Windows installation page.' }
+$librewolfArchive = Join-Path $dist 'librewolf-windows-x86_64-portable.zip'
+Invoke-WebRequest -Headers $headers -Uri $librewolfMatch.Value -OutFile $librewolfArchive
+$librewolfExtract = Join-Path $dist 'librewolf-extract'
+if (Test-Path -LiteralPath $librewolfExtract) { Remove-Item -LiteralPath $librewolfExtract -Recurse -Force }
+Expand-Archive -LiteralPath $librewolfArchive -DestinationPath $librewolfExtract -Force
+$librewolfExe = Get-ChildItem -LiteralPath $librewolfExtract -Filter 'librewolf.exe' -File -Recurse | Select-Object -First 1
+if (-not $librewolfExe) { throw 'The LibreWolf portable archive did not contain librewolf.exe.' }
+$librewolfPackage = Join-Path $stage 'librewolf'
+New-Item -ItemType Directory -Path $librewolfPackage -Force | Out-Null
+Get-ChildItem -LiteralPath $librewolfExe.Directory.FullName -Force |
+    Where-Object { $_.Extension -ne '.lnk' -and $_.Name -notin @('Start Menu', 'start menu', 'startmenu') } |
+    Copy-Item -Destination $librewolfPackage -Recurse -Force
+Get-ChildItem -LiteralPath $librewolfPackage -Filter '*.lnk' -File -Recurse | Remove-Item -Force
+Get-ChildItem -LiteralPath $librewolfPackage -Directory -Recurse |
+    Where-Object { $_.Name -in @('Start Menu', 'start menu', 'startmenu') } |
+    Sort-Object { $_.FullName.Length } -Descending | Remove-Item -Recurse -Force
+Remove-Item -LiteralPath $librewolfExtract -Recurse -Force
+
+$dashboardLauncher = @'
+@echo off
+setlocal
+set "PORT=%~1"
+if not defined PORT set "PORT=8765"
+set "PROFILE=%~dp0librewolf-profile"
+if not exist "%PROFILE%" mkdir "%PROFILE%"
+if not exist "%PROFILE%\user.js" (
+  >"%PROFILE%\user.js" echo user_pref("privacy.clearOnShutdown.cookies", false^);
+  >>"%PROFILE%\user.js" echo user_pref("privacy.clearOnShutdown_v2.cookiesAndStorage", false^);
+  >>"%PROFILE%\user.js" echo user_pref("privacy.sanitize.sanitizeOnShutdown", false^);
+  >>"%PROFILE%\user.js" echo user_pref("media.autoplay.default", 0^);
+  >>"%PROFILE%\user.js" echo user_pref("media.autoplay.blocking_policy", 0^);
+  >>"%PROFILE%\user.js" echo user_pref("browser.aboutwelcome.enabled", false^);
+  >>"%PROFILE%\user.js" echo user_pref("browser.shell.checkDefaultBrowser", false^);
+  >>"%PROFILE%\user.js" echo user_pref("browser.startup.firstrunSkipsHomepage", true^);
+  >>"%PROFILE%\user.js" echo user_pref("security.insecure_connection_text.enabled", false^);
+)
+findstr /C:"browser.aboutwelcome.enabled" "%PROFILE%\user.js" >nul || >>"%PROFILE%\user.js" echo user_pref("browser.aboutwelcome.enabled", false^);
+findstr /C:"browser.shell.checkDefaultBrowser" "%PROFILE%\user.js" >nul || >>"%PROFILE%\user.js" echo user_pref("browser.shell.checkDefaultBrowser", false^);
+findstr /C:"browser.startup.firstrunSkipsHomepage" "%PROFILE%\user.js" >nul || >>"%PROFILE%\user.js" echo user_pref("browser.startup.firstrunSkipsHomepage", true^);
+findstr /C:"security.insecure_connection_text.enabled" "%PROFILE%\user.js" >nul || >>"%PROFILE%\user.js" echo user_pref("security.insecure_connection_text.enabled", false^);
+start "" "%~dp0mediabridge.exe"
+timeout /t 2 /nobreak >nul
+start "" "%~dp0librewolf\librewolf.exe" --profile "%PROFILE%" --remote-debugging-port=9222 "http://127.0.0.1:%PORT%/"
+'@
+Set-Content -LiteralPath (Join-Path $stage 'mediabridge-dashboard.bat') -Value $dashboardLauncher -Encoding Ascii
 
 Write-Host 'Compiling the self-contained setup executable...'
 Push-Location $project
