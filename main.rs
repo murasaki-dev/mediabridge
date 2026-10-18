@@ -384,6 +384,7 @@ struct State {
     metadata_tx: Option<Sender<(String, Result<serde_json::Value, String>)>>,
     metadata_rx: Option<Receiver<(String, Result<serde_json::Value, String>)>>,
     pending_metadata: VecDeque<String>,
+    pending_queue_metadata: VecDeque<String>,
     metadata_in_flight: bool,
     playback_epoch: u64,
     playback_error: Option<String>,
@@ -719,6 +720,10 @@ fn cookie_browser_spec(browser: &str, profile: Option<&str>) -> Result<Option<St
             .or_else(|| env::var_os("XDG_DATA_HOME").map(|home| PathBuf::from(home).join("mediabridge/librewolf-profile")))
             .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share/mediabridge/librewolf-profile")))
             .ok_or("could not locate the MediaBridge LibreWolf profile")?;
+        if !profile.join("cookies.sqlite").is_file() {
+            eprintln!("LibreWolf has no cookies database yet; trying local playback without browser cookies. Sign in through the MediaBridge LibreWolf profile to enable authenticated playback.");
+            return Ok(None);
+        }
         return Ok(Some(format!("firefox:{}", profile.display())));
     }
     #[cfg(windows)]
@@ -750,6 +755,7 @@ fn ensure_librewolf_profile(profile: &Path) -> Result<(), String> {
         ("browser.shell.checkDefaultBrowser", "user_pref(\"browser.shell.checkDefaultBrowser\", false);\n"),
         ("browser.startup.firstrunSkipsHomepage", "user_pref(\"browser.startup.firstrunSkipsHomepage\", true);\n"),
         ("security.insecure_connection_text.enabled", "user_pref(\"security.insecure_connection_text.enabled\", false);\n"),
+        ("devtools.debugger.remote-enabled", "user_pref(\"devtools.debugger.remote-enabled\", true);\n"),
     ];
     let missing = required.iter().filter(|(key, _)| !existing.contains(key)).map(|(_, line)| *line).collect::<String>();
     if !missing.is_empty() {
@@ -1246,20 +1252,49 @@ fn drain_metadata(state: &mut State) {
 }
 
 fn dispatch_pending_metadata(state: &mut State) {
-    if state.metadata_in_flight || state.pending_metadata.is_empty() { return; }
+    if state.metadata_in_flight { return; }
     // Let mpv finish opening its stream before running another yt-dlp process;
     // otherwise metadata extraction competes with the playback extractor.
-    if state.current.as_ref().is_some_and(|item| item.local_playback) {
-        let Some(socket) = state.mpv_socket.as_deref() else { return; };
-        if mpv_property(socket, "time-pos").is_none() { return; }
-    }
-    let Some(url) = state.pending_metadata.pop_front() else { return; };
+    let url = if let Some(url) = state.pending_metadata.pop_front() {
+        if state.current.as_ref().is_some_and(|item| item.local_playback) {
+            let Some(socket) = state.mpv_socket.as_deref() else { state.pending_metadata.push_front(url); return; };
+            if mpv_property(socket, "time-pos").is_none()
+                || mpv_property(socket, "pause").and_then(|value| value.as_bool()) != Some(false) {
+                state.pending_metadata.push_front(url);
+                return;
+            }
+        }
+        url
+    } else {
+        if state.pending_queue_metadata.is_empty() || !current_playback_started(state) { return; }
+        let Some(url) = state.pending_queue_metadata.pop_front() else { return; };
+        url
+    };
     let Some(metadata_tx) = state.metadata_tx.clone() else { return; };
     state.metadata_in_flight = true;
     thread::spawn(move || {
         let result = resolve_media_url(&url);
         let _ = metadata_tx.send((url, result));
     });
+}
+
+fn current_playback_started(state: &mut State) -> bool {
+    let Some((local_playback, browser)) = state.current.as_ref().map(|item| (item.local_playback, item.browser.clone())) else { return false; };
+    if local_playback {
+        return state.mpv_socket.as_deref().is_some_and(|socket| {
+            mpv_property(socket, "time-pos").is_some()
+                && mpv_property(socket, "pause").and_then(|value| value.as_bool()) == Some(false)
+        });
+    }
+    #[cfg(any(windows, target_os = "linux"))]
+    if browser.as_deref().is_some_and(|browser| browser.to_ascii_lowercase().contains("librewolf")) {
+        return refresh_librewolf_video(state).is_some_and(|video| video.paused == Some(false));
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(player) = browser_player(browser.as_deref()) {
+        return run_playerctl(&player, &["status"]).is_ok_and(|status| status.trim().eq_ignore_ascii_case("playing"));
+    }
+    false
 }
 
 fn isolate_process_group(command: &mut Command) {
@@ -2226,7 +2261,8 @@ fn start_url(state: &mut State, cfg: &Config, mut item: QueueItem) -> Result<(),
                 ensure_librewolf_profile(&profile)?;
                 launch_args.push("--profile".into());
                 launch_args.push(profile.to_string_lossy().into_owned());
-                launch_args.push("--remote-debugging-port=9222".into());
+                launch_args.push("--remote-debugging-port".into());
+                launch_args.push("9222".into());
                 if let Some(url) = requested_url { launch_args.push(url); }
             }
             if let Some(profile) = profile.as_ref() {
@@ -2332,11 +2368,29 @@ fn advance(state: &mut State, cfg: &Config) {
         }
     }
     loop {
-        let ended = match state.player.as_mut() {
-            Some(child) => match child.try_wait() { Ok(Some(_)) => true, Ok(None) => false, Err(_) => true },
+        let exit = match state.player.as_mut() {
+            Some(child) => match child.try_wait() {
+                Ok(Some(status)) => Some(Ok(status)),
+                Ok(None) => None,
+                Err(error) => Some(Err(error)),
+            },
             None => break,
         };
-        if !ended { break; }
+        let Some(exit) = exit else { break; };
+        match exit {
+            Ok(status) if status.success() => println!("Playback process exited successfully"),
+            Ok(status) => {
+                let player = if state.current.as_ref().is_some_and(|item| item.local_playback) { "mpv" } else { "browser" };
+                let message = format!("{player} playback process exited with {status}");
+                eprintln!("{message}");
+                state.playback_error = Some(message);
+            }
+            Err(error) => {
+                let message = format!("could not read playback process status: {error}");
+                eprintln!("{message}");
+                state.playback_error = Some(message);
+            }
+        }
         state.player = None;
         if let Some(socket) = state.mpv_socket.take() { let _ = std::fs::remove_file(socket); }
         if let Some(item) = state.current.take() { push_history(state, item); }
@@ -2453,7 +2507,7 @@ fn open_dashboard_in_librewolf(url: &str) -> Result<Child, String> {
     let profile = managed_librewolf_profile()
         .ok_or("could not locate the MediaBridge LibreWolf profile")?;
     ensure_librewolf_profile(&profile)?;
-    Command::new(browser).arg("--profile").arg(profile).arg("--remote-debugging-port=9222").arg(url)
+    Command::new(browser).arg("--profile").arg(profile).arg("--remote-debugging-port").arg("9222").arg(url)
         .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
         .spawn().map_err(|error| format!("could not open the dashboard in bundled LibreWolf: {error}"))
 }
@@ -3099,6 +3153,11 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
             if let Err(e) = start_url(state, cfg, first) { respond(request, 500, json(&serde_json::json!({"error": e})), "application/json"); return; }
             state.queue.extend(items);
         }
+        for item in &state.queue {
+            if item.title.is_none() && !state.pending_queue_metadata.iter().any(|url| same_media_url(url, &item.url)) {
+                state.pending_queue_metadata.push_back(item.url.clone());
+            }
+        }
         respond(request, 202, json(&serde_json::json!({"ok": true, "added": count})), "application/json"); return;
     }
     if method == Method::Post && ["/play", "/queue", "/queue_next"].contains(&path.as_str()) {
@@ -3483,10 +3542,23 @@ fn main() {
         return;
     }
 
-    let event_loop = match winit::event_loop::EventLoop::<LinuxTrayEvent>::with_user_event().build() {
-        Ok(event_loop) => event_loop,
-        Err(error) => {
+    if let Err(error) = gtk::init() {
+        append_linux_log(format!("Could not initialize GTK for the tray; running without a tray icon: {error}"));
+        run_linux_server(cfg);
+        return;
+    }
+
+    let event_loop = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        winit::event_loop::EventLoop::<LinuxTrayEvent>::with_user_event().build()
+    })) {
+        Ok(Ok(event_loop)) => event_loop,
+        Ok(Err(error)) => {
             append_linux_log(format!("Could not start the desktop tray loop; running without a tray icon: {error}"));
+            run_linux_server(cfg);
+            return;
+        }
+        Err(_) => {
+            append_linux_log("Desktop tray initialization panicked; running without a tray icon.".into());
             run_linux_server(cfg);
             return;
         }
@@ -3515,14 +3587,17 @@ fn main() {
         shutdown: Arc::clone(&shutdown), dashboard_url, tray: None,
         dashboard_id: None, logs_id: None, quit_id: None,
     };
-    if let Err(error) = event_loop.run_app(&mut app) {
-        append_linux_log(format!("Linux tray event loop stopped: {error}"));
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| event_loop.run_app(&mut app))) {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => append_linux_log(format!("Linux tray event loop stopped: {error}")),
+        Err(_) => append_linux_log("Linux tray event loop panicked; keeping MediaBridge running without a tray icon.".into()),
     }
     if app.tray.is_none() && !shutdown.load(Ordering::Acquire) {
         append_linux_log("The desktop has no usable tray backend; continuing with MediaBridge running without a tray icon.".into());
-        shutdown.store(true, Ordering::Release);
+        // The tray event loop has exited, but the HTTP server is independent.
+        // Keep the service alive headless until systemd (or another supervisor)
+        // stops it; setting shutdown here would make the server exit too.
         let _ = server_thread.join();
-        run_linux_server(config().unwrap_or(cfg));
         return;
     }
     shutdown.store(true, Ordering::Release);

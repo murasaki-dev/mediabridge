@@ -164,14 +164,16 @@ if not exist "%PROFILE%\user.js" (
   >>"%PROFILE%\user.js" echo user_pref("browser.shell.checkDefaultBrowser", false^);
   >>"%PROFILE%\user.js" echo user_pref("browser.startup.firstrunSkipsHomepage", true^);
   >>"%PROFILE%\user.js" echo user_pref("security.insecure_connection_text.enabled", false^);
+  >>"%PROFILE%\user.js" echo user_pref("devtools.debugger.remote-enabled", true^);
 )
 findstr /C:"browser.aboutwelcome.enabled" "%PROFILE%\user.js" >nul || >>"%PROFILE%\user.js" echo user_pref("browser.aboutwelcome.enabled", false^);
 findstr /C:"browser.shell.checkDefaultBrowser" "%PROFILE%\user.js" >nul || >>"%PROFILE%\user.js" echo user_pref("browser.shell.checkDefaultBrowser", false^);
 findstr /C:"browser.startup.firstrunSkipsHomepage" "%PROFILE%\user.js" >nul || >>"%PROFILE%\user.js" echo user_pref("browser.startup.firstrunSkipsHomepage", true^);
 findstr /C:"security.insecure_connection_text.enabled" "%PROFILE%\user.js" >nul || >>"%PROFILE%\user.js" echo user_pref("security.insecure_connection_text.enabled", false^);
+findstr /C:"devtools.debugger.remote-enabled" "%PROFILE%\user.js" >nul || >>"%PROFILE%\user.js" echo user_pref("devtools.debugger.remote-enabled", true^);
 start "" "%~dp0mediabridge.exe"
 timeout /t 2 /nobreak >nul
-start "" "%~dp0librewolf\librewolf.exe" --profile "%PROFILE%" --remote-debugging-port=9222 "http://127.0.0.1:%PORT%/"
+start "" "%~dp0librewolf\librewolf.exe" --profile "%PROFILE%" --remote-debugging-port 9222 "http://127.0.0.1:%PORT%/"
 '@
 Set-Content -LiteralPath (Join-Path $stage 'mediabridge-dashboard.bat') -Value $dashboardLauncher -Encoding Ascii
 

@@ -19,6 +19,7 @@ LOCAL_ARCHIVE=""
 DISTROBOX_RUNTIME=0
 DISTROBOX_NAME="mediabridge-runtime"
 DISTROBOX_MARKER="$STATE_DIR/distrobox-runtime"
+NEEDS_SESSION_REFRESH=0
 
 usage() {
   cat <<'EOF'
@@ -135,7 +136,10 @@ fi
 # ydotool system service. Mouse support is optional on hosts without it.
 if command -v systemctl >/dev/null 2>&1 && sudo systemctl cat ydotool.service >/dev/null 2>&1; then
   if ! getent group mediabridge-input >/dev/null 2>&1; then sudo groupadd --system mediabridge-input; fi
-  sudo usermod -aG mediabridge-input "$(id -un)"
+  if ! id -nG "$(id -un)" | tr ' ' '\n' | grep -Fxq mediabridge-input; then
+    sudo usermod -aG mediabridge-input "$(id -un)"
+    NEEDS_SESSION_REFRESH=1
+  fi
   YDOTOOLD_PATH="$(command -v ydotoold || true)"
   if [[ -n "$YDOTOOLD_PATH" ]]; then
     sudo install -d /etc/systemd/system/ydotool.service.d
@@ -150,7 +154,7 @@ EOF
     sudo systemctl daemon-reload
     sudo systemctl enable --now ydotool.service
     sudo systemctl restart ydotool.service
-    echo "Configured ydotool for Wayland. Log out and back in to apply the new input group membership."
+    echo "Configured ydotool for Wayland. The new input group membership will apply at your next login."
   fi
 fi
 
@@ -179,8 +183,20 @@ if [[ -n "$LOCAL_ARCHIVE" ]]; then
 else
   APP_ARCHIVE="$TMP_DIR/$APP_ASSET"
   URL="https://github.com/$REPOSITORY/releases/latest/download/$APP_ASSET"
-  if ! curl --fail --location --silent --show-error "$URL" --output "$APP_ARCHIVE"; then
-    echo "No downloadable MediaBridge release was found. Build on Linux with ./build-linux.sh, or publish $APP_ASSET to a GitHub Release." >&2
+  if curl --fail --location --silent --show-error "$URL" --output "$APP_ARCHIVE"; then
+    :
+  else
+    CURL_STATUS=$?
+    if [[ "$CURL_STATUS" -eq 7 || "$CURL_STATUS" -eq 6 || "$CURL_STATUS" -eq 28 ]]; then
+      echo "Could not connect to GitHub to download MediaBridge (curl exit $CURL_STATUS). Check this machine's internet connection, DNS, firewall, or proxy, then retry." >&2
+      echo "Requested URL: $URL" >&2
+    elif [[ "$CURL_STATUS" -eq 22 ]]; then
+      echo "GitHub responded, but the latest release asset was unavailable. Confirm the public latest release contains an asset named exactly '$APP_ASSET'." >&2
+      echo "Requested URL: $URL" >&2
+      echo "For a local build, run ./build-linux.sh and then ./install-linux.sh --local." >&2
+    else
+      echo "Could not download MediaBridge from GitHub (curl exit $CURL_STATUS). Requested URL: $URL" >&2
+    fi
     exit 1
   fi
 fi
@@ -275,28 +291,40 @@ else
   chmod 755 "$BIN_DIR/mediabridge-uninstall"
 fi
 VERSION="$(basename "$LIBREWOLF_URL" | sed -E 's/^librewolf-([0-9.]+-[0-9]+)-linux-x86_64-appimage\.AppImage$/\1/')"
-if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?-[0-9]+$ ]]; then VERSION="current"; fi
+if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?-[0-9]+$ ]]; then VERSION="unversioned"; fi
 LW_STAGING="$APP_DIR/.librewolf-stage-$$"
 rm -rf "$LW_STAGING"
 mkdir -p "$LW_STAGING"
 cp -a "$TMP_DIR/librewolf-extract/squashfs-root" "$LW_STAGING/squashfs-root"
-if [[ ! -d "$APP_DIR/librewolf-$VERSION" ]]; then
-  mv "$LW_STAGING/squashfs-root" "$APP_DIR/librewolf-$VERSION"
+if [[ "$VERSION" == "unversioned" || ! -x "$APP_DIR/librewolf-$VERSION/squashfs-root/AppRun" ]]; then
+  rm -rf "$APP_DIR/librewolf-$VERSION"
+  mv "$LW_STAGING" "$APP_DIR/librewolf-$VERSION"
+else
+  rm -rf "$LW_STAGING"
 fi
-rm -rf "$LW_STAGING"
 ln -sfn "librewolf-$VERSION" "$APP_DIR/.librewolf-current-$$"
 mv -Tf "$APP_DIR/.librewolf-current-$$" "$APP_DIR/librewolf-current"
+if [[ ! -x "$APP_DIR/librewolf-current/squashfs-root/AppRun" ]]; then
+  echo "LibreWolf installation is incomplete: its AppRun launcher is missing." >&2
+  exit 1
+fi
 
 MOONLIGHT_STAGING="$APP_DIR/.moonlight-stage-$$"
 rm -rf "$MOONLIGHT_STAGING"
 mkdir -p "$MOONLIGHT_STAGING"
 cp -a "$TMP_DIR/moonlight-extract/squashfs-root" "$MOONLIGHT_STAGING/squashfs-root"
-if [[ ! -d "$APP_DIR/moonlight-$MOONLIGHT_VERSION" ]]; then
-  mv "$MOONLIGHT_STAGING/squashfs-root" "$APP_DIR/moonlight-$MOONLIGHT_VERSION"
+if [[ ! -x "$APP_DIR/moonlight-$MOONLIGHT_VERSION/squashfs-root/AppRun" ]]; then
+  rm -rf "$APP_DIR/moonlight-$MOONLIGHT_VERSION"
+  mv "$MOONLIGHT_STAGING" "$APP_DIR/moonlight-$MOONLIGHT_VERSION"
+else
+  rm -rf "$MOONLIGHT_STAGING"
 fi
-rm -rf "$MOONLIGHT_STAGING"
 ln -sfn "moonlight-$MOONLIGHT_VERSION" "$APP_DIR/.moonlight-current-$$"
 mv -Tf "$APP_DIR/.moonlight-current-$$" "$APP_DIR/moonlight-current"
+if [[ ! -x "$APP_DIR/moonlight-current/squashfs-root/AppRun" ]]; then
+  echo "Moonlight installation is incomplete: its AppRun launcher is missing." >&2
+  exit 1
+fi
 
 install -m 755 "$TMP_DIR/mediabridge/mediabridge" "$APP_DIR/mediabridge"
 cat > "$BIN_DIR/mediabridge-librewolf" <<EOF
@@ -318,10 +346,14 @@ pref("privacy.clearOnShutdown_v2.cookiesAndStorage", false);
 pref("privacy.sanitize.sanitizeOnShutdown", false);
 pref("media.autoplay.default", 0);
 pref("media.autoplay.blocking_policy", 0);
+pref("devtools.debugger.remote-enabled", true);
 PREFS
 fi
 if ! grep -q 'media.autoplay.default' "\$BROWSER_HOME/.librewolf/librewolf.overrides.cfg"; then
   printf '\npref("media.autoplay.default", 0);\npref("media.autoplay.blocking_policy", 0);\n' >> "\$BROWSER_HOME/.librewolf/librewolf.overrides.cfg"
+fi
+if ! grep -q 'devtools.debugger.remote-enabled' "\$BROWSER_HOME/.librewolf/librewolf.overrides.cfg"; then
+  printf '\npref("devtools.debugger.remote-enabled", true);\n' >> "\$BROWSER_HOME/.librewolf/librewolf.overrides.cfg"
 fi
 mkdir -p "\$PROFILE"
 if [[ ! -f "\$PROFILE/user.js" ]]; then
@@ -340,15 +372,17 @@ user_pref("browser.aboutwelcome.enabled", false);
 user_pref("browser.shell.checkDefaultBrowser", false);
 user_pref("browser.startup.firstrunSkipsHomepage", true);
 user_pref("security.insecure_connection_text.enabled", false);
+user_pref("devtools.debugger.remote-enabled", true);
 PREFS
 fi
 for pref in \
   'browser.aboutwelcome.enabled", false' \
   'browser.shell.checkDefaultBrowser", false' \
   'browser.startup.firstrunSkipsHomepage", true' \
-  'security.insecure_connection_text.enabled", false'; do
-  if ! grep -q "$pref" "\$PROFILE/user.js"; then
-    printf 'user_pref("%s);\n' "$pref" >> "\$PROFILE/user.js"
+  'security.insecure_connection_text.enabled", false' \
+  'devtools.debugger.remote-enabled", true'; do
+  if ! grep -q "\$pref" "\$PROFILE/user.js"; then
+    printf 'user_pref("%s);\n' "\$pref" >> "\$PROFILE/user.js"
   fi
 done
 if ! grep -q 'media.autoplay.default' "\$PROFILE/user.js"; then
@@ -356,7 +390,7 @@ if ! grep -q 'media.autoplay.default' "\$PROFILE/user.js"; then
 fi
 export HOME="\$BROWSER_HOME"
 unset XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME
-exec "\$APP_DIR/librewolf-current/squashfs-root/AppRun" --profile "\$PROFILE" --remote-debugging-port=9222 "\$@"
+exec "\$APP_DIR/librewolf-current/squashfs-root/AppRun" --profile "\$PROFILE" --remote-debugging-port 9222 "\$@"
 EOF
 chmod 755 "$BIN_DIR/mediabridge-librewolf"
 
@@ -440,6 +474,10 @@ EOF
 fi
 
 if [[ "$HAS_USER_SYSTEMD" -eq 1 ]]; then
+  # The installer may start the service before desktop autostart runs. Import
+  # this live GNOME/KDE/Wayland session first so mpv and browsers can create
+  # visible windows immediately, rather than waiting for the next login.
+  systemctl --user import-environment DISPLAY WAYLAND_DISPLAY XAUTHORITY DBUS_SESSION_BUS_ADDRESS XDG_CURRENT_DESKTOP XDG_SESSION_TYPE XDG_RUNTIME_DIR 2>/dev/null || true
   systemctl --user daemon-reload || true
   if [[ "$NO_AUTOSTART" -eq 0 ]] && systemctl --user enable --now mediabridge.service; then
     echo "MediaBridge is installed and enabled for this user. Its tray icon opens the dashboard in bundled LibreWolf."
@@ -449,11 +487,25 @@ if [[ "$HAS_USER_SYSTEMD" -eq 1 ]]; then
 else
   echo "MediaBridge is installed. This system has no systemd user manager; use the desktop menu entry to open the dashboard."
 fi
+if [[ "$HAS_USER_SYSTEMD" -eq 1 ]] && systemctl --user is-active --quiet mediabridge.service; then
+  echo "MediaBridge server status: running. Check it with: systemctl --user status mediabridge.service"
+else
+  echo "Check whether the server is reachable locally with: curl -i http://127.0.0.1:8765/status"
+  if [[ "$HAS_USER_SYSTEMD" -eq 1 ]]; then
+    echo "If it is not running, inspect its log with: journalctl --user -u mediabridge.service -n 80 --no-pager"
+  fi
+fi
+echo "Default dashboard address: http://127.0.0.1:8765/ (the configured port may differ)."
 echo "LibreWolf profile and YouTube cookies persist in: $APP_DIR/librewolf-profile"
 echo "MediaBridge logs: $STATE_DIR/mediabridge.log"
+if [[ "$NEEDS_SESSION_REFRESH" -eq 1 ]]; then
+  echo "No restart is needed to run MediaBridge. Log out and back in later (or restart) only to activate the ydotool input group; you do not need to rerun this installer."
+fi
 if [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
   # Open the onboarding dashboard in the managed browser. The dashboard lets
   # the user open each supported sign-in page and verify cookie access.
-  "$BIN_DIR/mediabridge-dashboard" >/dev/null 2>&1 &
-  disown 2>/dev/null || true
+  nohup "$BIN_DIR/mediabridge-dashboard" >>"$STATE_DIR/dashboard-launch.log" 2>&1 </dev/null &
+  echo "Opening the MediaBridge dashboard in bundled LibreWolf. If it does not appear, inspect: $STATE_DIR/dashboard-launch.log"
+else
+  echo "No graphical session was detected, so the dashboard was not opened automatically. Open it later with: $BIN_DIR/mediabridge-dashboard"
 fi
