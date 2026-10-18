@@ -755,6 +755,9 @@ fn ensure_librewolf_profile(profile: &Path) -> Result<(), String> {
         ("browser.shell.checkDefaultBrowser", "user_pref(\"browser.shell.checkDefaultBrowser\", false);\n"),
         ("browser.startup.firstrunSkipsHomepage", "user_pref(\"browser.startup.firstrunSkipsHomepage\", true);\n"),
         ("security.insecure_connection_text.enabled", "user_pref(\"security.insecure_connection_text.enabled\", false);\n"),
+        // Keep LibreWolf's generic Firefox user-agent for sign-in compatibility.
+        // This applies only to MediaBridge's managed profile.
+        ("privacy.resistFingerprinting\", true", "user_pref(\"privacy.resistFingerprinting\", true);\n"),
         ("devtools.debugger.remote-enabled", "user_pref(\"devtools.debugger.remote-enabled\", true);\n"),
     ];
     let missing = required.iter().filter(|(key, _)| !existing.contains(key)).map(|(_, line)| *line).collect::<String>();
@@ -839,13 +842,18 @@ fn active_youtube_account(value: &serde_json::Value) -> Option<(String, Option<S
     let mut stack = vec![value];
     while let Some(node) = stack.pop() {
         if let Some(header) = node.get("activeAccountHeaderRenderer") {
-            let name = header.get("accountName").and_then(|name| name.get("simpleText").and_then(|value| value.as_str())
-                .or_else(|| name.get("runs").and_then(|runs| runs.as_array()).and_then(|runs| runs.iter().find_map(|run| run.get("text").and_then(|text| text.as_str())))))?;
-            let photo = header.get("accountPhoto").and_then(|photo| photo.get("thumbnails"))
+            let account_name = header.get("accountName");
+            let name = account_name.and_then(|name| name.as_str()
+                .or_else(|| name.get("simpleText").and_then(|value| value.as_str()))
+                .or_else(|| name.get("runs").and_then(|runs| runs.as_array()).and_then(|runs| runs.iter().find_map(|run| run.get("text").and_then(|text| text.as_str())))));
+            let photo = header.get("accountPhoto").or_else(|| header.get("accountAvatar"))
+                .and_then(|photo| photo.get("thumbnails"))
                 .and_then(|thumbnails| thumbnails.as_array()).and_then(|thumbnails| thumbnails.last())
                 .and_then(|thumbnail| thumbnail.get("url")).and_then(|url| url.as_str())
                 .map(|url| if url.starts_with("//") { format!("https:{url}") } else { url.to_string() });
-            return Some((name.to_string(), photo));
+            if let Some(name) = name.filter(|name| !name.trim().is_empty()) {
+                return Some((name.to_string(), photo));
+            }
         }
         match node {
             serde_json::Value::Array(items) => stack.extend(items.iter()),
@@ -856,31 +864,78 @@ fn active_youtube_account(value: &serde_json::Value) -> Option<(String, Option<S
     None
 }
 
+fn youtube_initial_data(html: &str) -> Option<serde_json::Value> {
+    for marker in ["ytInitialData =", "window[\"ytInitialData\"] ="] {
+        let Some(marker_start) = html.find(marker) else { continue; };
+        let start = marker_start + marker.len();
+        let bytes = html.as_bytes();
+        let Some(object_start) = (start..bytes.len()).find(|index| bytes[*index] == b'{') else { continue; };
+        let mut depth = 0usize;
+        let mut in_string = false;
+        let mut escaped = false;
+        for index in object_start..bytes.len() {
+            let byte = bytes[index];
+            if in_string {
+                if escaped { escaped = false; }
+                else if byte == b'\\' { escaped = true; }
+                else if byte == b'"' { in_string = false; }
+                continue;
+            }
+            match byte {
+                b'"' => in_string = true,
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        if let Ok(value) = serde_json::from_slice(&bytes[object_start..=index]) { return Some(value); }
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
 fn youtube_account_from_cookies(cookie_file: &Path) -> Result<Option<(String, Option<String>)>, String> {
     let contents = std::fs::read_to_string(cookie_file).map_err(|error| format!("could not read the temporary browser cookie export: {error}"))?;
-    let mut youtube_lines = Vec::new();
+    let mut google_lines = Vec::new();
     let mut sapisid = None;
     for line in contents.lines() {
         if line.starts_with('#') && !line.starts_with("#HttpOnly_") { continue; }
         let fields = line.trim_start_matches("#HttpOnly_").split('\t').collect::<Vec<_>>();
         if fields.len() < 7 { continue; }
         let domain = fields[0].trim_start_matches('.').to_ascii_lowercase();
-        if domain == "youtube.com" || domain.ends_with(".youtube.com") {
-            youtube_lines.push(line.to_string());
+        // YouTube login sessions often depend on cookies scoped to google.com
+        // as well as youtube.com. Keep both domains for the account lookup.
+        if domain == "youtube.com" || domain.ends_with(".youtube.com")
+            || domain == "google.com" || domain.ends_with(".google.com") {
+            google_lines.push(line.to_string());
+        }
+        if domain == "youtube.com" || domain.ends_with(".youtube.com")
+            || domain == "google.com" || domain.ends_with(".google.com") {
             if matches!(fields[5], "SAPISID" | "__Secure-3PAPISID" | "__Secure-1PAPISID") {
                 sapisid = Some(fields[6].to_string());
             }
         }
     }
-    if youtube_lines.is_empty() { return Ok(None); }
-    let filtered = format!("# Netscape HTTP Cookie File\n{}\n", youtube_lines.join("\n"));
-    std::fs::write(cookie_file, filtered).map_err(|error| format!("could not filter the temporary cookie export: {error}"))?;
+    if google_lines.is_empty() { return Ok(None); }
+    // Only send Google and YouTube cookies to YouTube. Keep this temporary
+    // export intact: the account lookup needs both domains and the file is
+    // removed by CookieCheckTempDir when this request completes.
+    let account_cookie_file = cookie_file.with_file_name("youtube-account-cookies.txt");
+    std::fs::write(&account_cookie_file, format!("# Netscape HTTP Cookie File\n{}\n", google_lines.join("\n")))
+        .map_err(|error| format!("could not prepare the temporary YouTube account cookie export: {error}"))?;
     let curl = if cfg!(windows) { "curl.exe" } else { "curl" };
     let page = Command::new(curl).args(["--fail", "--silent", "--show-error", "--location", "--max-time", "20", "--cookie"])
-        .arg(cookie_file).arg("https://www.youtube.com/").output()
+        .arg(&account_cookie_file).arg("https://www.youtube.com/").output()
         .map_err(|error| format!("could not request YouTube's account page: {error}"))?;
     if !page.status.success() { return Err(format!("YouTube account page request failed ({})", page.status)); }
     let html = String::from_utf8_lossy(&page.stdout);
+    if let Some(account) = youtube_initial_data(&html).as_ref().and_then(active_youtube_account) {
+        return Ok(Some(account));
+    }
     let Some(config) = extract_youtube_web_config(&html) else { return Ok(None); };
     let api_key = config.get("INNERTUBE_API_KEY").and_then(|value| value.as_str()).ok_or("YouTube's page did not provide its account-menu request key")?;
     let context = config.get("INNERTUBE_CONTEXT").cloned().ok_or("YouTube's page did not provide its account-menu context")?;
@@ -889,8 +944,9 @@ fn youtube_account_from_cookies(cookie_file: &Path) -> Result<Option<(String, Op
     let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
     let mut command = Command::new(curl);
     command.args(["--fail", "--silent", "--show-error", "--location", "--max-time", "20", "--cookie"])
-        .arg(cookie_file)
-        .args(["--header", "Content-Type: application/json", "--header", "X-YouTube-Client-Name: 1"])
+        .arg(&account_cookie_file)
+        .args(["--header", "Content-Type: application/json", "--header", "X-YouTube-Client-Name: 1",
+            "--header", "Origin: https://www.youtube.com", "--header", "Referer: https://www.youtube.com/"])
         .arg("--header").arg(format!("X-YouTube-Client-Version: {client_version}"));
     if let Some(sapisid) = sapisid {
         let digest = Sha1::digest(format!("{timestamp} {sapisid} https://www.youtube.com").as_bytes());
@@ -979,14 +1035,18 @@ fn check_cookie_access(browser: &str, profile: Option<&str>, site: &str) -> Resu
     let metadata: serde_json::Value = serde_json::from_slice(&output.stdout)
         .map_err(|e| format!("yt-dlp read cookies but could not confirm a YouTube video: {e}"))?;
     let title = metadata.get("title").and_then(|value| value.as_str()).unwrap_or("YouTube video");
-    let account = youtube_account_from_cookies(&cookie_file).ok().flatten();
+    let (account, account_lookup_error) = match youtube_account_from_cookies(&cookie_file) {
+        Ok(account) => (account, None),
+        Err(error) => (None, Some(error)),
+    };
     #[cfg(target_os = "linux")]
     let browser_label = if browser == "librewolf" || browser == "auto" { "MediaBridge LibreWolf".to_string() } else { spec.clone() };
     #[cfg(not(target_os = "linux"))]
     let browser_label = spec.clone();
     Ok(serde_json::json!({"ok": true, "site": "youtube", "browser": browser_label, "title": title,
         "channel_name": account.as_ref().map(|account| account.0.as_str()),
-        "channel_avatar_url": account.as_ref().and_then(|account| account.1.as_deref())}))
+        "channel_avatar_url": account.as_ref().and_then(|account| account.1.as_deref()),
+        "channel_lookup_error": account_lookup_error}))
 }
 
 fn expand(args: &[String], value: &str, placeholder: &str) -> Vec<String> {
@@ -2531,6 +2591,38 @@ fn open_dashboard_in_librewolf(url: &str) -> Result<Child, String> {
         .spawn().map_err(|error| format!("could not open dashboard in bundled LibreWolf: {error}"))
 }
 
+#[cfg(windows)]
+fn open_librewolf_sign_in(url: &str) -> Result<Child, String> {
+    let install_dir = env::current_exe().map_err(|error| format!("could not locate MediaBridge's install directory: {error}"))?
+        .parent().ok_or("could not locate MediaBridge's install directory")?.to_path_buf();
+    let browser = install_dir.join("librewolf").join("librewolf.exe");
+    if !browser.is_file() { return Err(format!("bundled LibreWolf was not found at {}", browser.display())); }
+    let profile = managed_librewolf_profile().ok_or("could not locate the persistent MediaBridge LibreWolf profile")?;
+    ensure_librewolf_profile(&profile)?;
+    Command::new(browser).arg("--profile").arg(profile).arg(url)
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+        .spawn().map_err(|error| format!("could not open sign-in in bundled LibreWolf: {error}"))
+}
+
+#[cfg(target_os = "linux")]
+fn open_librewolf_sign_in(url: &str) -> Result<Child, String> {
+    let home = env::var_os("HOME").map(PathBuf::from)
+        .ok_or("could not locate the installed MediaBridge LibreWolf launcher")?;
+    let launcher = env::var_os("MEDIABRIDGE_LIBREWOLF_LAUNCHER")
+        .map(PathBuf::from).unwrap_or_else(|| home.join(".local/bin/mediabridge-librewolf"));
+    if !launcher.is_file() {
+        return Err(format!("MediaBridge LibreWolf launcher was not found at {}", launcher.display()));
+    }
+    Command::new(&launcher).env("MEDIABRIDGE_LIBREWOLF_NO_BIDI", "1").arg(url)
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+        .spawn().map_err(|error| format!("could not open sign-in in bundled LibreWolf: {error}"))
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+fn open_librewolf_sign_in(_url: &str) -> Result<Child, String> {
+    Err("managed LibreWolf sign-in is available on Windows and Linux".into())
+}
+
 #[cfg(unix)]
 fn mpv_socket_path() -> PathBuf {
     let base = env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(env::temp_dir);
@@ -2961,6 +3053,46 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         match check_cookie_access(&parsed.cookies_browser, parsed.cookies_profile.as_deref(), &parsed.site) {
             Ok(result) => respond(request, 200, json(&result), "application/json"),
             Err(error) => respond(request, 422, json(&serde_json::json!({"error": error})), "application/json"),
+        }
+        return;
+    }
+    if method == Method::Post && path == "/settings/accounts/login" {
+        let mut body = String::new();
+        if request.as_reader().read_to_string(&mut body).is_err() {
+            respond(request, 400, "{\"error\":\"invalid body\"}".into(), "application/json"); return;
+        }
+        let parsed: serde_json::Value = match serde_json::from_str(&body) {
+            Ok(value) => value,
+            Err(error) => { respond(request, 400, json(&serde_json::json!({"error": error.to_string()})), "application/json"); return; }
+        };
+        let site = parsed.get("site").and_then(|value| value.as_str()).unwrap_or("");
+        let (url, site_label) = match site {
+            "youtube" => ("https://www.youtube.com/", "YouTube"),
+            "twitch" => ("https://www.twitch.tv/login", "Twitch"),
+            _ => { respond(request, 400, "{\"error\":\"choose YouTube or Twitch to sign in\"}".into(), "application/json"); return; }
+        };
+        let browser_needs_close = state.current.as_ref().is_some_and(|item| item.local_playback
+            || !item.browser.as_deref().is_some_and(|browser| browser.to_ascii_lowercase().contains("librewolf")));
+        if let Err(error) = stop_current(state) {
+            respond(request, 409, json(&serde_json::json!({"error": format!("could not restart LibreWolf for sign-in: {error}")})), "application/json");
+            return;
+        }
+        // stop_current closes LibreWolf when it owns the current playback. If
+        // mpv or another browser was active, close the dashboard's LibreWolf too.
+        #[cfg(any(windows, target_os = "linux"))]
+        if browser_needs_close {
+            match librewolf_bidi_session().and_then(|mut bidi| bidi.close_browser()) {
+                Ok(()) => state.librewolf_bidi = None,
+                Err(error) => {
+                    respond(request, 409, json(&serde_json::json!({"error": format!("could not close the managed LibreWolf dashboard before sign-in: {error}")})), "application/json");
+                    return;
+                }
+            }
+        }
+        match open_librewolf_sign_in(url) {
+            Ok(_child) => respond(request, 202, json(&serde_json::json!({"ok": true, "site": site_label,
+                "message": format!("Sign in to {site_label}, close LibreWolf when finished, then reopen the MediaBridge dashboard.")})), "application/json"),
+            Err(error) => respond(request, 500, json(&serde_json::json!({"error": error})), "application/json"),
         }
         return;
     }

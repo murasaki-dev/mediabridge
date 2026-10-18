@@ -60,7 +60,7 @@ if [[ -f "$DISTROBOX_MARKER" ]]; then
   fi
 fi
 
-rm -f "$BIN_DIR/mediabridge-dashboard" "$BIN_DIR/mediabridge-logs" \
+rm -f "$BIN_DIR/mediabridge" "$BIN_DIR/mediabridge-dashboard" "$BIN_DIR/mediabridge-logs" \
   "$BIN_DIR/mediabridge-autostart" "$BIN_DIR/mediabridge-librewolf" \
   "$BIN_DIR/mediabridge-run" "$BIN_DIR/mediabridge-uninstall" \
   "$DESKTOP_DIR/mediabridge.desktop" "$AUTOSTART_FILE"

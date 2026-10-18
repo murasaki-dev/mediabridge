@@ -48,7 +48,7 @@
   <div id="onboarding-slot"></div>
   <section id="account-setup-card" class="card" aria-labelledby="accounts-heading">
     <h2 id="accounts-heading">Connect your accounts</h2>
-    <p class="muted">On the MediaBridge computer, sign in with the browser profile MediaBridge uses, then check whether each site's cookies can be read. YouTube can also report the active channel and profile picture. Twitch currently confirms that its sign-in cookie is present; it cannot verify the session or identify the account yet.</p>
+    <p class="muted">On the MediaBridge computer, use the sign-in buttons to open the persistent browser profile without playback automation. This closes the dashboard and stops current playback. After signing in, close LibreWolf and reopen the dashboard, then check whether each site's cookies can be read. YouTube can also report the active channel and profile picture. Twitch currently confirms that its sign-in cookie is present; it cannot verify the session or identify the account yet.</p>
     <div class="row" style="margin:12px 0">
       <strong class="grow">YouTube</strong><img id="youtube-account-avatar" class="account-avatar hidden" alt="YouTube profile picture"><span id="youtube-account-status" class="muted" role="status">Not checked</span>
       <button type="button" data-account-login="youtube">Sign in</button><button type="button" data-account-check="youtube">Check</button>
@@ -159,15 +159,21 @@
     $('settings-drawer').setAttribute('aria-hidden', String(!open));
   }
   const ACCOUNT_SETUP_KEY = 'mediabridge.account-setup-dismissed.v1';
+  const ACCOUNT_CHECKS_KEY = 'mediabridge.account-cookie-checks.v1';
   const accountSetupCard = $('account-setup-card');
   let accountSetupDismissed = false;
   try {
     accountSetupDismissed = localStorage.getItem(ACCOUNT_SETUP_KEY) === 'yes';
     if (!accountSetupDismissed) localStorage.setItem(ACCOUNT_SETUP_KEY, 'yes');
   } catch (_) {}
-  if (accountSetupDismissed) $('account-settings-slot').append(accountSetupCard);
+  const finishAccountSetupRow = $('finish-account-setup').parentElement;
+  if (accountSetupDismissed) {
+    $('account-settings-slot').append(accountSetupCard);
+    finishAccountSetupRow.classList.add('hidden');
+  }
   $('finish-account-setup').onclick = () => {
     try { localStorage.setItem(ACCOUNT_SETUP_KEY, 'yes'); } catch (_) {}
+    finishAccountSetupRow.classList.add('hidden');
     $('account-settings-slot').append(accountSetupCard);
     setSettingsOpen(true);
   };
@@ -354,30 +360,87 @@
       const result = await checkAccountCookies('youtube');
       $('cookies-status').textContent = result.channel_name
         ? `Cookies loaded successfully from ${result.browser}. YouTube channel: ${result.channel_name}.`
-        : `Cookies read successfully from ${result.browser} and YouTube responded, but its active channel profile details were unavailable.`;
+        : `Cookies read successfully from ${result.browser}, but YouTube did not provide channel profile details${result.channel_lookup_error ? `: ${result.channel_lookup_error}` : '.'}`;
     } catch (error) { $('cookies-status').textContent = 'Could not confirm cookie access: ' + error.message; }
     finally { button.disabled = false; }
   };
   async function checkAccountCookies(site) {
     const avatar = $(`${site}-account-avatar`), status = $(`${site}-account-status`);
     avatar.removeAttribute('src'); avatar.classList.add('hidden'); status.textContent = 'Checking…';
+    function readSavedChecks() {
+      try {
+        const value = JSON.parse(localStorage.getItem(ACCOUNT_CHECKS_KEY) || '{}');
+        return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+      } catch (_) { return {}; }
+    }
+    function saveCheck(record) {
+      try {
+        const saved = readSavedChecks();
+        saved[site] = record;
+        localStorage.setItem(ACCOUNT_CHECKS_KEY, JSON.stringify(saved));
+      } catch (_) {}
+    }
+    try {
+      const saved = readSavedChecks();
+      delete saved[site];
+      localStorage.setItem(ACCOUNT_CHECKS_KEY, JSON.stringify(saved));
+    } catch (_) {}
     try {
       const result = await api('/settings/cookies/check', {site, cookies_browser:$('cookies-browser').value, cookies_profile:$('cookies-profile').value.trim() || null});
       if (site === 'youtube') {
         status.textContent = result.channel_name ? `Signed in as ${result.channel_name}` : `Cookies confirmed in ${result.browser}`;
         if (result.channel_avatar_url) { avatar.src = result.channel_avatar_url; avatar.classList.remove('hidden'); }
+        const settingsStatus = result.channel_name
+          ? `Cookies loaded successfully from ${result.browser}. YouTube channel: ${result.channel_name}.`
+          : `Cookies read successfully from ${result.browser}, but YouTube did not provide channel profile details${result.channel_lookup_error ? `: ${result.channel_lookup_error}` : '.'}`;
+        $('cookies-status').textContent = settingsStatus;
+        saveCheck({status: status.textContent, settings_status: settingsStatus, avatar: result.channel_avatar_url || null, checked_at: new Date().toISOString()});
       } else {
         status.textContent = result.profile_name
           ? `Twitch auth cookie found (${result.profile_name}); session not validated`
           : 'Twitch auth cookie found; session not validated';
+        saveCheck({status: status.textContent, avatar: null, checked_at: new Date().toISOString()});
       }
       avatar.onerror = () => { avatar.removeAttribute('src'); avatar.classList.add('hidden'); };
       return result;
-    } catch (error) { status.textContent = 'Not confirmed: ' + error.message; throw error; }
+    } catch (error) {
+      status.textContent = 'Not confirmed: ' + error.message;
+      if (site === 'youtube') $('cookies-status').textContent = 'Could not confirm cookie access: ' + error.message;
+      saveCheck({status: status.textContent, settings_status: site === 'youtube' ? $('cookies-status').textContent : null, avatar: null, checked_at: new Date().toISOString()});
+      throw error;
+    }
   }
-  document.querySelectorAll('[data-account-login]').forEach(button => button.onclick = () => {
+  try {
+    const savedChecks = JSON.parse(localStorage.getItem(ACCOUNT_CHECKS_KEY) || '{}');
+    for (const site of ['youtube', 'twitch']) {
+      const saved = savedChecks?.[site];
+      if (!saved || typeof saved.status !== 'string') continue;
+      $(`${site}-account-status`).textContent = saved.status;
+      const checkedAt = Date.parse(saved.checked_at || '');
+      if (Number.isFinite(checkedAt)) $(`${site}-account-status`).title = `Last checked ${new Date(checkedAt).toLocaleString()}`;
+      if (site === 'youtube' && typeof saved.settings_status === 'string') $('cookies-status').textContent = saved.settings_status;
+      if (site === 'youtube' && typeof saved.avatar === 'string' && saved.avatar.startsWith('https://')) {
+        const avatar = $('youtube-account-avatar');
+        avatar.src = saved.avatar;
+        avatar.classList.remove('hidden');
+        avatar.onerror = () => { avatar.removeAttribute('src'); avatar.classList.add('hidden'); };
+        $('youtube-channel-avatar').src = saved.avatar;
+        $('youtube-channel-avatar').classList.remove('hidden');
+      }
+    }
+  } catch (_) {}
+  document.querySelectorAll('[data-account-login]').forEach(button => button.onclick = async () => {
     const site = button.dataset.accountLogin;
-    window.open(site === 'youtube' ? 'https://www.youtube.com/' : 'https://www.twitch.tv/', '_blank', 'noopener,noreferrer');
+    const label = site === 'youtube' ? 'YouTube' : 'Twitch';
+    if (!confirm(`LibreWolf will close the dashboard and stop current playback, then reopen without playback controls for ${label} sign-in. After signing in, close LibreWolf and reopen the dashboard. Continue?`)) return;
+    const status = $(`${site}-account-status`);
+    status.textContent = `Switching LibreWolf to ${label} sign-in mode…`;
+    document.querySelectorAll('[data-account-login]').forEach(item => item.disabled = true);
+    try { await api('/settings/accounts/login', {site}); }
+    catch (error) {
+      status.textContent = `Could not open ${label} sign-in: ${error.message}`;
+      document.querySelectorAll('[data-account-login]').forEach(item => item.disabled = false);
+    }
   });
   document.querySelectorAll('[data-account-check]').forEach(button => button.onclick = () => checkAccountCookies(button.dataset.accountCheck).catch(() => {}));
   let sunshinePairPoll = null;

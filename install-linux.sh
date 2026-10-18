@@ -372,6 +372,7 @@ user_pref("browser.aboutwelcome.enabled", false);
 user_pref("browser.shell.checkDefaultBrowser", false);
 user_pref("browser.startup.firstrunSkipsHomepage", true);
 user_pref("security.insecure_connection_text.enabled", false);
+user_pref("privacy.resistFingerprinting", true);
 user_pref("devtools.debugger.remote-enabled", true);
 PREFS
 fi
@@ -380,6 +381,7 @@ for pref in \
   'browser.shell.checkDefaultBrowser", false' \
   'browser.startup.firstrunSkipsHomepage", true' \
   'security.insecure_connection_text.enabled", false' \
+  'privacy.resistFingerprinting", true' \
   'devtools.debugger.remote-enabled", true'; do
   if ! grep -q "\$pref" "\$PROFILE/user.js"; then
     printf 'user_pref("%s);\n' "\$pref" >> "\$PROFILE/user.js"
@@ -390,6 +392,9 @@ if ! grep -q 'media.autoplay.default' "\$PROFILE/user.js"; then
 fi
 export HOME="\$BROWSER_HOME"
 unset XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME
+if [[ "\${MEDIABRIDGE_LIBREWOLF_NO_BIDI:-0}" == 1 ]]; then
+  exec "\$APP_DIR/librewolf-current/squashfs-root/AppRun" --profile "\$PROFILE" "\$@"
+fi
 exec "\$APP_DIR/librewolf-current/squashfs-root/AppRun" --profile "\$PROFILE" --remote-debugging-port 9222 "\$@"
 EOF
 chmod 755 "$BIN_DIR/mediabridge-librewolf"
@@ -413,6 +418,43 @@ set -euo pipefail
 exec "$BIN_DIR/mediabridge-run" xdg-open "$STATE_DIR/mediabridge.log"
 EOF
 chmod 755 "$BIN_DIR/mediabridge-logs"
+
+cat > "$BIN_DIR/mediabridge" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+case "\${1:-}" in
+  login)
+    shift
+    exec "$BIN_DIR/mediabridge-run" env MEDIABRIDGE_LIBREWOLF_NO_BIDI=1 "$BIN_DIR/mediabridge-librewolf" "\${@:-https://accounts.google.com/}"
+    ;;
+  browser)
+    shift
+    if [[ \$# -eq 0 ]]; then
+      exec "$BIN_DIR/mediabridge-dashboard"
+    fi
+    exec "$BIN_DIR/mediabridge-run" "$BIN_DIR/mediabridge-librewolf" "\$@"
+    ;;
+  dashboard)
+    exec "$BIN_DIR/mediabridge-dashboard"
+    ;;
+  logs)
+    exec "$BIN_DIR/mediabridge-logs"
+    ;;
+  uninstall)
+    exec "$BIN_DIR/mediabridge-uninstall" "\${@:2}"
+    ;;
+  *)
+    echo "Usage: mediabridge {login|browser|dashboard|logs|uninstall}"
+    echo "  login     Open Google sign-in in managed LibreWolf without BiDi; close other LibreWolf windows first"
+    echo "  browser   Open the dashboard in the managed LibreWolf profile (or a supplied URL)"
+    echo "  dashboard Open the MediaBridge dashboard in managed LibreWolf"
+    echo "  logs      Open the MediaBridge log file"
+    echo "  uninstall Run the MediaBridge uninstaller"
+    exit 2
+    ;;
+esac
+EOF
+chmod 755 "$BIN_DIR/mediabridge"
 
 cat > "$BIN_DIR/mediabridge-autostart" <<EOF
 #!/usr/bin/env bash
