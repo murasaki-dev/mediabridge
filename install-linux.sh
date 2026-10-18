@@ -16,6 +16,9 @@ SYSTEMD_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user"
 PACKAGE_ONLY=0
 NO_AUTOSTART=0
 LOCAL_ARCHIVE=""
+DISTROBOX_RUNTIME=0
+DISTROBOX_NAME="mediabridge-runtime"
+DISTROBOX_MARKER="$STATE_DIR/distrobox-runtime"
 
 usage() {
   cat <<'EOF'
@@ -52,8 +55,6 @@ if [[ "$(uname -m)" != x86_64 ]]; then
   echo "This installer currently supports x86_64 Linux. Build assets for other architectures are not available yet." >&2
   exit 1
 fi
-command -v sudo >/dev/null 2>&1 || { echo "sudo is required to install system dependencies." >&2; exit 1; }
-
 if [[ ! -r /etc/os-release ]]; then
   echo "Cannot identify this Linux distribution (missing /etc/os-release)." >&2
   exit 1
@@ -62,34 +63,62 @@ fi
 . /etc/os-release
 DISTRO_ID="${ID:-unknown}"
 DISTRO_LIKE="${ID_LIKE:-}"
-PACKAGE_MANAGER=""
-for candidate in apt-get dnf pacman zypper xbps-install; do
-  if command -v "$candidate" >/dev/null 2>&1; then PACKAGE_MANAGER="$candidate"; break; fi
-done
 
-case "$PACKAGE_MANAGER" in
-  apt-get)
-    sudo apt-get update
-    sudo apt-get install -y ca-certificates curl mpv yt-dlp playerctl xdotool ydotool xdg-utils python3 python3-secretstorage libnotify-bin libgtk-3-0 libayatana-appindicator3-1
-    ;;
-  dnf)
-    sudo dnf install -y ca-certificates curl mpv yt-dlp playerctl xdotool ydotool xdg-utils python3 python3-secretstorage libnotify gtk3 libappindicator-gtk3
-    ;;
-  pacman)
-    sudo pacman -S --needed --noconfirm ca-certificates curl mpv yt-dlp playerctl xdotool ydotool xdg-utils python python-secretstorage libnotify gtk3 libappindicator-gtk3
-    ;;
-  zypper)
-    sudo zypper --non-interactive install ca-certificates curl mpv yt-dlp playerctl xdotool ydotool xdg-utils python3 python3-secretstorage libnotify-tools gtk3 libayatana-appindicator3-1
-    ;;
-  xbps-install)
-    sudo xbps-install -Sy ca-certificates curl mpv yt-dlp playerctl xdotool ydotool xdg-utils python3 python3-secretstorage libnotify gtk+3 libappindicator
-    ;;
-  *)
-    echo "Unsupported package manager for '$DISTRO_ID' (ID_LIKE: ${DISTRO_LIKE:-none}). Supported managers: apt, dnf, pacman, zypper, and xbps." >&2
-    echo "Install curl, mpv, yt-dlp, playerctl, xdotool, ydotool, xdg-utils, Python 3 with SecretStorage, and libnotify manually, then adapt this installer." >&2
+# Bazzite and SteamOS use image-based/read-only hosts. Keep their runtime
+# packages in a dedicated user-owned Distrobox rather than changing the host
+# image (or installing packages that an OS update may erase).
+if [[ "$DISTRO_ID" == "bazzite" || "$DISTRO_ID" == "steamos" ]]; then
+  DISTROBOX_RUNTIME=1
+  if ! command -v distrobox >/dev/null 2>&1 || ! command -v podman >/dev/null 2>&1; then
+    echo "$DISTRO_ID needs Distrobox and Podman for the no-host-changes install path." >&2
+    echo "Install/enable those user-space tools first, then rerun this installer. It will not unlock the system image or layer packages." >&2
     exit 1
-    ;;
-esac
+  fi
+  if [[ ! -f "$DISTROBOX_MARKER" ]] && distrobox enter --name "$DISTROBOX_NAME" --headless -- true >/dev/null 2>&1; then
+    echo "A Distrobox named '$DISTROBOX_NAME' already exists but is not marked as MediaBridge-managed." >&2
+    echo "Rename or remove that container, then rerun this installer so it does not alter another app's environment." >&2
+    exit 1
+  fi
+  if ! distrobox enter --name "$DISTROBOX_NAME" --headless -- true >/dev/null 2>&1; then
+    echo "Creating the MediaBridge user-space Fedora runtime. The first setup downloads a Fedora container image."
+    distrobox create --name "$DISTROBOX_NAME" --image docker.io/library/fedora:latest --yes
+    mkdir -p "$STATE_DIR"
+    touch "$DISTROBOX_MARKER"
+  fi
+  echo "Installing MediaBridge runtime packages inside the $DISTROBOX_NAME Distrobox."
+  distrobox enter --name "$DISTROBOX_NAME" --headless -- bash -lc \
+    'sudo dnf install -y ca-certificates curl mpv yt-dlp playerctl xdotool ydotool xdg-utils python3 python3-secretstorage libnotify gtk3 libappindicator-gtk3'
+  PACKAGE_MANAGER="Distrobox (Fedora)"
+else
+  command -v sudo >/dev/null 2>&1 || { echo "sudo is required to install system dependencies." >&2; exit 1; }
+  PACKAGE_MANAGER=""
+  for candidate in apt-get dnf pacman zypper xbps-install; do
+    if command -v "$candidate" >/dev/null 2>&1; then PACKAGE_MANAGER="$candidate"; break; fi
+  done
+  case "$PACKAGE_MANAGER" in
+    apt-get)
+      sudo apt-get update
+      sudo apt-get install -y ca-certificates curl mpv yt-dlp playerctl xdotool ydotool xdg-utils python3 python3-secretstorage libnotify-bin libgtk-3-0 libayatana-appindicator3-1
+      ;;
+    dnf)
+      sudo dnf install -y ca-certificates curl mpv yt-dlp playerctl xdotool ydotool xdg-utils python3 python3-secretstorage libnotify gtk3 libappindicator-gtk3
+      ;;
+    pacman)
+      sudo pacman -S --needed --noconfirm ca-certificates curl mpv yt-dlp playerctl xdotool ydotool xdg-utils python python-secretstorage libnotify gtk3 libappindicator-gtk3
+      ;;
+    zypper)
+      sudo zypper --non-interactive install ca-certificates curl mpv yt-dlp playerctl xdotool ydotool xdg-utils python3 python3-secretstorage libnotify-tools gtk3 libayatana-appindicator3-1
+      ;;
+    xbps-install)
+      sudo xbps-install -Sy ca-certificates curl mpv yt-dlp playerctl xdotool ydotool xdg-utils python3 python3-secretstorage libnotify gtk+3 libappindicator
+      ;;
+    *)
+      echo "Unsupported package manager for '$DISTRO_ID' (ID_LIKE: ${DISTRO_LIKE:-none}). Supported managers: apt, dnf, pacman, zypper, and xbps." >&2
+      echo "Install curl, mpv, yt-dlp, playerctl, xdotool, ydotool, xdg-utils, Python 3 with SecretStorage, and libnotify manually, then adapt this installer." >&2
+      exit 1
+      ;;
+  esac
+fi
 command -v curl >/dev/null 2>&1 || { echo "Could not install curl through $PACKAGE_MANAGER." >&2; exit 1; }
 
 # Deno supplies yt-dlp's JavaScript challenge runtime.
@@ -219,6 +248,24 @@ if [[ ! -x "$TMP_DIR/librewolf-extract/squashfs-root/AppRun" ]]; then
 fi
 
 mkdir -p "$APP_DIR" "$BIN_DIR" "$CONFIG_DIR" "$STATE_DIR" "$DESKTOP_DIR" "$SYSTEMD_DIR"
+if [[ "$DISTROBOX_RUNTIME" -eq 1 ]]; then
+  cat > "$BIN_DIR/mediabridge-run" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+exec distrobox enter --name "$DISTROBOX_NAME" --headless -- env \\
+  "MEDIABRIDGE_LIBREWOLF_PROFILE=$APP_DIR/librewolf-profile" \\
+  "MEDIABRIDGE_LIBREWOLF_LAUNCHER=$BIN_DIR/mediabridge-librewolf" \\
+  "PATH=$HOME/.local/bin:$HOME/.deno/bin:/usr/local/bin:/usr/bin:/bin" \\
+  "\$@"
+EOF
+else
+  cat > "$BIN_DIR/mediabridge-run" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+exec "$@"
+EOF
+fi
+chmod 755 "$BIN_DIR/mediabridge-run"
 if [[ -f "$SCRIPT_DIR/uninstall-linux.sh" ]]; then
   install -m 755 "$SCRIPT_DIR/uninstall-linux.sh" "$BIN_DIR/mediabridge-uninstall"
 else
@@ -316,20 +363,20 @@ chmod 755 "$BIN_DIR/mediabridge-librewolf"
 cat > "$BIN_DIR/mediabridge-dashboard" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-PORT="\$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("bind", "0.0.0.0:8765").rsplit(":",1)[-1])' "$CONFIG_DIR/mediabridge.json" 2>/dev/null || echo 8765)"
+PORT="\$("$BIN_DIR/mediabridge-run" python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("bind", "0.0.0.0:8765").rsplit(":",1)[-1])' "$CONFIG_DIR/mediabridge.json" 2>/dev/null || echo 8765)"
 if ! systemctl --user start mediabridge.service 2>/dev/null; then
   if ! curl --fail --silent --max-time 1 "http://127.0.0.1:\$PORT/status" >/dev/null; then
-    "$APP_DIR/mediabridge" >/dev/null 2>&1 &
+    "$BIN_DIR/mediabridge-run" "$APP_DIR/mediabridge" >/dev/null 2>&1 &
   fi
 fi
-exec "$BIN_DIR/mediabridge-librewolf" "http://127.0.0.1:\$PORT/"
+exec "$BIN_DIR/mediabridge-run" "$BIN_DIR/mediabridge-librewolf" "http://127.0.0.1:\$PORT/"
 EOF
 chmod 755 "$BIN_DIR/mediabridge-dashboard"
 
 cat > "$BIN_DIR/mediabridge-logs" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-exec xdg-open "$STATE_DIR/mediabridge.log"
+exec "$BIN_DIR/mediabridge-run" xdg-open "$STATE_DIR/mediabridge.log"
 EOF
 chmod 755 "$BIN_DIR/mediabridge-logs"
 
@@ -353,7 +400,7 @@ Type=simple
 Environment="PATH=%h/.local/bin:%h/.deno/bin:/usr/local/bin:/usr/bin:/bin"
 Environment="MEDIABRIDGE_LIBREWOLF_PROFILE=$APP_DIR/librewolf-profile"
 Environment="MEDIABRIDGE_LIBREWOLF_LAUNCHER=$BIN_DIR/mediabridge-librewolf"
-ExecStart="$APP_DIR/mediabridge"
+ExecStart="$BIN_DIR/mediabridge-run" "$APP_DIR/mediabridge"
 Restart=on-failure
 RestartSec=3
 
@@ -386,7 +433,7 @@ else
 [Desktop Entry]
 Type=Application
 Name=MediaBridge service and tray
-Exec="$APP_DIR/mediabridge"
+Exec="$BIN_DIR/mediabridge-run" "$APP_DIR/mediabridge"
 Terminal=false
 X-GNOME-Autostart-enabled=true
 EOF

@@ -5,6 +5,8 @@ APP_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/mediabridge"
 BIN_DIR="${HOME}/.local/bin"
 CONFIG_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/mediabridge"
 STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/mediabridge"
+DISTROBOX_MARKER="$STATE_DIR/distrobox-runtime"
+DISTROBOX_NAME="mediabridge-runtime"
 DESKTOP_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/applications"
 SYSTEMD_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/systemd/user"
 AUTOSTART_FILE="${XDG_CONFIG_HOME:-${HOME}/.config}/autostart/mediabridge.desktop"
@@ -44,9 +46,23 @@ if command -v pkill >/dev/null 2>&1; then
   pkill --uid "$(id -u)" --exact mediabridge 2>/dev/null || true
 fi
 
+# SteamOS/Bazzite keep MediaBridge's Linux packages in a dedicated user
+# Distrobox. Remove only the container created by this installer; never touch
+# similarly named containers unless our ownership marker is present.
+if [[ -f "$DISTROBOX_MARKER" ]]; then
+  if command -v distrobox >/dev/null 2>&1; then
+    distrobox rm --force "$DISTROBOX_NAME" || {
+      echo "Could not remove the MediaBridge runtime container '$DISTROBOX_NAME'." >&2
+      echo "Remove it later with: distrobox rm --force $DISTROBOX_NAME" >&2
+    }
+  else
+    echo "Distrobox is unavailable; the MediaBridge runtime container could not be removed." >&2
+  fi
+fi
+
 rm -f "$BIN_DIR/mediabridge-dashboard" "$BIN_DIR/mediabridge-logs" \
   "$BIN_DIR/mediabridge-autostart" "$BIN_DIR/mediabridge-librewolf" \
-  "$BIN_DIR/mediabridge-uninstall" \
+  "$BIN_DIR/mediabridge-run" "$BIN_DIR/mediabridge-uninstall" \
   "$DESKTOP_DIR/mediabridge.desktop" "$AUTOSTART_FILE"
 
 if [[ "$PURGE_DATA" -eq 1 ]]; then

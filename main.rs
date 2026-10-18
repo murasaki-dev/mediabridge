@@ -18,7 +18,9 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::sync::{Mutex, OnceLock, RwLock};
+#[cfg(windows)]
+use std::sync::Mutex;
+use std::sync::{OnceLock, RwLock};
 use std::thread;
 use std::time::Duration;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
@@ -1025,9 +1027,14 @@ fn media_tool_command(name: &str) -> Command {
             return command;
         }
     }
-    let mut command = Command::new(name);
+    let command = Command::new(name);
     #[cfg(windows)]
-    windows_hide_console(&mut command);
+    {
+        let mut command = command;
+        windows_hide_console(&mut command);
+        return command;
+    }
+    #[cfg(not(windows))]
     command
 }
 
@@ -1050,13 +1057,14 @@ fn browser_candidates(browser: &str) -> Vec<String> {
         let browser = env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.join("librewolf/librewolf.exe")));
         return browser.into_iter().map(|path| path.to_string_lossy().into_owned()).collect();
     }
-    let mut candidates = match executable.as_str() {
+    let candidates = match executable.as_str() {
         "chromium" | "chromium-browser" => vec![browser.to_string(), "chromium".into(), "chromium-browser".into()],
         "google-chrome" | "google-chrome-stable" => vec![browser.to_string(), "google-chrome".into(), "google-chrome-stable".into()],
         _ => vec![browser.to_string()],
     };
     #[cfg(windows)]
-    {
+    let candidates = {
+        let mut candidates = candidates;
         let locations = match executable.as_str() {
             "chromium" | "chromium-browser" | "google-chrome" | "google-chrome-stable" => vec![
                 env::var_os("PROGRAMFILES").map(PathBuf::from).map(|p| p.join("Google/Chrome/Application/chrome.exe")),
@@ -1072,7 +1080,8 @@ fn browser_candidates(browser: &str) -> Vec<String> {
         let installed = locations.into_iter().flatten().filter(|path| path.is_file())
             .map(|path| path.to_string_lossy().into_owned()).collect::<Vec<_>>();
         candidates.splice(0..0, installed);
-    }
+        candidates
+    };
     candidates
 }
 
@@ -2481,7 +2490,7 @@ fn mpv_socket_path() -> PathBuf {
 
 #[cfg(unix)]
 fn mpv_ipc(socket_path: &Path, command: serde_json::Value) -> Result<serde_json::Value, String> {
-    let mut stream = UnixStream::connect(socket_path)
+    let stream = UnixStream::connect(socket_path)
         .map_err(|e| format!("could not connect to mpv IPC at {}: {e}", socket_path.display()))?;
     stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
     mpv_ipc_exchange(stream, command)
@@ -3469,7 +3478,7 @@ fn main() {
     };
     let has_desktop_session = env::var_os("DISPLAY").is_some() || env::var_os("WAYLAND_DISPLAY").is_some();
     if !has_desktop_session {
-        append_linux_log("No graphical desktop session detected; starting MediaBridge without a tray icon.");
+        append_linux_log("No graphical desktop session detected; starting MediaBridge without a tray icon.".into());
         run_linux_server(cfg);
         return;
     }
@@ -3510,7 +3519,7 @@ fn main() {
         append_linux_log(format!("Linux tray event loop stopped: {error}"));
     }
     if app.tray.is_none() && !shutdown.load(Ordering::Acquire) {
-        append_linux_log("The desktop has no usable tray backend; continuing with MediaBridge running without a tray icon.");
+        append_linux_log("The desktop has no usable tray backend; continuing with MediaBridge running without a tray icon.".into());
         shutdown.store(true, Ordering::Release);
         let _ = server_thread.join();
         run_linux_server(config().unwrap_or(cfg));
