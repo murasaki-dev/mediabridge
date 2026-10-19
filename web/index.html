@@ -99,8 +99,8 @@
   <section class="card">
     <h2>Add media</h2>
     <div id="media-controls">
-    <label for="url">Paste a video or stream link</label>
-    <textarea id="url" placeholder="https://www.youtube.com/watch?v=… or smb://server/share/video.mp4"></textarea>
+    <label for="url">Paste a website, video, or stream URL</label>
+    <textarea id="url" placeholder="https://example.com or smb://server/share/video.mp4"></textarea>
     <div class="row">
       <div><label for="mode">Playback</label><select id="mode"><option value="local">Direct player (mpv + yt-dlp)</option><option value="browser">Web browser</option><option value="sunshine">Sunshine / Moonlight</option></select></div>
       <div id="quality-wrap"><label for="quality">Maximum quality</label><select id="quality"><option value="best">Best available</option><option>480</option><option>720</option><option>1080</option><option>1440</option><option>2160</option></select></div>
@@ -229,7 +229,7 @@
     if (smb) return smb[0].replace(/[),.;!\]}]+$/, '');
     const match = text.trim().match(/https?:\/\/[^\s<>"']+/i);
     let link = (match ? match[0] : text.trim()).replace(/[),.;!\]}]+$/, '');
-    if (/^(?:youtube\.com|www\.youtube\.com|m\.youtube\.com|youtu\.be|twitch\.tv|www\.twitch\.tv)\//i.test(link)) link = 'https://' + link;
+    if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(link)) link = 'https://' + link;
     return link;
   }
   async function api(path, body, method = 'POST') {
@@ -329,10 +329,8 @@
       const browser = $('browser');
       browser.replaceChildren(new Option('MediaBridge LibreWolf', 'librewolf'));
       browser.value = 'librewolf';
-      if (platform.os === 'windows') {
-        $('browser-controls-note').textContent = 'Managed LibreWolf playback supports play, pause, seeking, and volume controls when a video tab is active.';
-        $('browser-controls-note').classList.remove('hidden');
-      }
+      $('browser-controls-note').textContent = 'Managed LibreWolf opens websites fullscreen and reports their page title. It attempts embedded video fullscreen once; playback controls work when the page exposes a controllable video.';
+      $('browser-controls-note').classList.remove('hidden');
     } catch (_) {}
   }
   $('save-playback-preferences').onclick = async () => {
@@ -533,7 +531,7 @@
   function itemFromForm() {
     const url = cleanLink($('url').value);
     const smb = /^smb:\/\//i.test(url);
-    if (!url || (!/^https?:\/\//i.test(url) && !smb)) throw new Error('Paste a complete http(s) video link or smb:// share path first.');
+    if (!url || (!/^https?:\/\//i.test(url) && !smb)) throw new Error('Paste a complete http(s) website or media URL, or an smb:// share path.');
     if (smb && mode.value !== 'local') throw new Error('SMB shares require Direct player (mpv) mode.');
     const item = {url};
     if ($('autoplay-after-queue').checked) {
@@ -558,7 +556,7 @@
   async function resolveLink(input = $('url').value) {
     const url = cleanLink(input);
     if (/^smb:\/\//i.test(url)) return {url, title: decodeURIComponent(url.split('/').filter(Boolean).pop() || url)};
-    if (!url || !/^https?:\/\//i.test(url)) throw new Error('Paste a complete http(s) video link or smb:// share path first.');
+    if (!url || !/^https?:\/\//i.test(url)) throw new Error('Paste a complete http(s) website or media URL.');
     if (previewCache?.url === url) return previewCache;
     previewCache = await api('/resolve', {url});
     return previewCache;
@@ -701,6 +699,7 @@
           button.onclick = async () => { try { await api(path, body); await refresh(); } catch (error) { message(error.message); } };
           actions.append(button);
         };
+        addButton('Play now', '/queue/play', {index}, false);
         addButton('↑', '/queue/move', {index, to:Math.max(0, index-1)}, index === 0);
         addButton('↓', '/queue/move', {index, to:Math.min(items.length-1, index+1)}, index === items.length-1);
         if (item.autoplay_generated) addButton('Keep', '/queue/promote', {index}, false);

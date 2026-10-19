@@ -1197,6 +1197,28 @@ fn twitch_url(url: &str) -> bool {
     host == "twitch.tv" || host.ends_with(".twitch.tv")
 }
 
+fn website_host(url: &str) -> Option<String> {
+    let (_, rest) = url.split_once("://")?;
+    let authority = rest.split(['/', '?', '#']).next()?;
+    let authority = authority.rsplit_once('@').map(|(_, host)| host).unwrap_or(authority).to_ascii_lowercase();
+    Some(authority.strip_prefix("www.").unwrap_or(&authority).to_string())
+}
+
+fn website_path(url: &str) -> Option<String> {
+    let (_, rest) = url.split_once("://")?;
+    let path = rest.find(['/', '?', '#']).map(|index| &rest[index..]).unwrap_or("/");
+    let path = if path.starts_with('?') { format!("/{path}") } else if path.is_empty() { "/".to_string() } else { path.to_string() };
+    Some(path.trim_end_matches('/').to_string())
+}
+
+fn same_website_host(left: &str, right: &str) -> bool {
+    website_host(left).is_some() && website_host(left) == website_host(right)
+}
+
+fn same_website_page(left: &str, right: &str) -> bool {
+    same_website_host(left, right) && website_path(left) == website_path(right)
+}
+
 fn clean_media_url(input: &str, allow_smb: bool) -> Result<String, String> {
     let trimmed = input.trim();
     if trimmed.to_ascii_lowercase().starts_with("smb://") {
@@ -1797,7 +1819,10 @@ impl LibreWolfBidi {
                 youtube_url(candidate) && wanted_video.as_ref().is_none_or(|id| youtube_video_id(candidate).as_ref() == Some(id))
             } else if twitch_url(url) {
                 twitch_url(candidate) && candidate.contains("twitch.tv/")
-            } else { false }
+            } else { same_website_page(url, candidate) }
+        }).or_else(|| {
+            if youtube_url(url) || twitch_url(url) { None }
+            else { contexts.iter().find(|(_, candidate, _)| same_website_host(url, candidate)) }
         }).map(|(id, _, window)| (id.clone(), window.clone()));
         if let Some((id, window)) = selected.as_ref() {
             if self.context_id.as_deref() != Some(id.as_str()) {
@@ -1805,14 +1830,15 @@ impl LibreWolfBidi {
                     // Firefox may ignore page actions while its native window is minimized.
                     #[cfg(not(windows))]
                     let _ = self.call("browser.setClientWindowState", serde_json::json!({"clientWindow":window,"state":"normal"}));
-                    #[cfg(windows)]
-                    let _ = window;
                 }
                 let _ = self.call("browsingContext.activate", serde_json::json!({"context":id}));
-                // Keep the browser window normal here. Video fullscreen is
-                // requested from the site's player element during refresh;
-                // fullscreening the browser chrome can leave Firefox minimized
-                // or fullscreen on the wrong monitor.
+                if let Some(window) = window {
+                    if let Err(error) = self.call("browser.setClientWindowState", serde_json::json!({"clientWindow":window,"state":"fullscreen"})) {
+                        eprintln!("could not fullscreen the LibreWolf playback window: {error}");
+                    }
+                }
+                // The browser window is fullscreened above; the page's embedded
+                // video gets a separate, less persistent fullscreen attempt below.
                 self.fullscreen_attempted_at = None;
             }
         }
@@ -1848,28 +1874,43 @@ impl LibreWolfBidi {
         }
         const STATE_SCRIPT: &str = r#"(() => {
           const v=document.querySelector('video');
-          const b=document.querySelector('.ytp-fullscreen-button, [data-a-target="player-fullscreen-button"]');
+          const player=document.querySelector('.html5-video-player, [data-a-target="video-player"]');
+          const b=document.querySelector('.ytp-fullscreen-button, [data-a-target="player-fullscreen-button"]') ||
+            [...document.querySelectorAll('button,[role="button"],[aria-label],[title]')].find(e=>/full.?screen|expand/i.test((e.getAttribute('aria-label')||'')+' '+(e.getAttribute('title')||'')));
           const r=b?.getBoundingClientRect();
+          const f=document.fullscreenElement;
+          const embeddedFullscreen=!!f && (f===v || !!v?.contains(f) || f===player || !!player?.contains(f) || !!player?.classList.contains('ytp-fullscreen'));
           if (v && !v.__mediabridgeEndHook) {
             v.__mediabridgeEndHook=true;
             v.addEventListener('ended',()=>window.__mediabridgeVideoEnded=true);
             v.addEventListener('playing',()=>window.__mediabridgeVideoEnded=false);
           }
           return JSON.stringify({title:document.title,url:location.href,currentTime:v?.currentTime,duration:v?.duration,
-            volume:v?.volume,paused:v?.paused,ended:!!v?.ended || !!window.__mediabridgeVideoEnded,fullscreen:!!document.fullscreenElement,
-            button:r?{x:r.x+r.width/2,y:r.y+r.height/2}:null});
+            volume:v?.volume,paused:v?.paused,ended:!!v?.ended || !!window.__mediabridgeVideoEnded,embeddedFullscreen,
+            hasVideo:!!v,button:r&&r.width&&r.height?{x:r.x+r.width/2,y:r.y+r.height/2}:null});
         })()"#;
         let value = self.evaluate(&context, STATE_SCRIPT)?;
-        let should_retry_fullscreen = self.fullscreen_attempted_at
-            .is_none_or(|attempt| attempt.elapsed() >= Duration::from_secs(2));
-        if value.get("fullscreen").and_then(|value| value.as_bool()) != Some(true) && should_retry_fullscreen {
-            if let Some(button) = value.get("button") {
+        let supported_fullscreen = youtube_url(url) || twitch_url(url);
+        let needs_embedded_fullscreen = value.get("embeddedFullscreen").and_then(|value| value.as_bool()) != Some(true);
+        let has_fullscreen_target = value.get("button").is_some() || value.get("hasVideo").and_then(|value| value.as_bool()) == Some(true);
+        let should_attempt = if supported_fullscreen {
+            self.fullscreen_attempted_at.is_none_or(|attempt| attempt.elapsed() >= Duration::from_secs(2))
+        } else {
+            self.fullscreen_attempted_at.is_none() && has_fullscreen_target
+        };
+        if needs_embedded_fullscreen && should_attempt {
+            // Generic sites get one attempt once a video or fullscreen control appears.
+            // YouTube and Twitch retain their existing retry behavior.
+            if !supported_fullscreen { self.fullscreen_attempted_at = Some(std::time::Instant::now()); }
+            let attempted = if let Some(button) = value.get("button") {
                 if let (Some(x), Some(y)) = (button.get("x").and_then(|value| value.as_f64()), button.get("y").and_then(|value| value.as_f64())) {
-                    if self.call("input.performActions", serde_json::json!({"context":context,"actions":[{"type":"pointer","id":"mediabridge-mouse","actions":[{"type":"pointerMove","x":x,"y":y,"duration":250},{"type":"pointerDown","button":0},{"type":"pointerUp","button":0}]}]})).is_ok() {
-                        self.fullscreen_attempted_at = Some(std::time::Instant::now());
-                    }
-                }
-            }
+                    self.call("input.performActions", serde_json::json!({"context":context,"actions":[{"type":"pointer","id":"mediabridge-mouse","actions":[{"type":"pointerMove","x":x,"y":y,"duration":250},{"type":"pointerDown","button":0},{"type":"pointerUp","button":0}]}]})).is_ok()
+                } else { false }
+            } else if !supported_fullscreen {
+                self.evaluate(&context, "(() => { const v=document.querySelector('video'); if (!v?.requestFullscreen) return 'unavailable'; return v.requestFullscreen().then(()=> 'ok').catch(()=> 'blocked'); })()")
+                    .is_ok_and(|result| result.as_str() == Some("ok"))
+            } else { false };
+            if supported_fullscreen && attempted { self.fullscreen_attempted_at = Some(std::time::Instant::now()); }
         }
         let video = LibreWolfVideoState {
             title: value.get("title").and_then(|value| value.as_str()).map(str::to_string),
@@ -1944,6 +1985,36 @@ fn control_librewolf(state: &mut State, operation: &str, value: Option<f64>) -> 
     }
     let bidi = state.librewolf_bidi.as_mut().ok_or("LibreWolf BiDi session is not active")?;
     let context = bidi.context_id.clone().ok_or("could not identify the LibreWolf playback tab")?;
+    if matches!(operation, "zoom_in" | "zoom_out" | "zoom_reset") {
+        let mut actions = vec![serde_json::json!({"type":"keyDown","value":"\u{e009}"})];
+        match operation {
+            "zoom_in" => {
+                actions.push(serde_json::json!({"type":"keyDown","value":"\u{e008}"}));
+                actions.push(serde_json::json!({"type":"keyDown","value":"="}));
+                actions.push(serde_json::json!({"type":"keyUp","value":"="}));
+                actions.push(serde_json::json!({"type":"keyUp","value":"\u{e008}"}));
+            }
+            "zoom_out" => {
+                actions.push(serde_json::json!({"type":"keyDown","value":"-"}));
+                actions.push(serde_json::json!({"type":"keyUp","value":"-"}));
+            }
+            _ => {
+                actions.push(serde_json::json!({"type":"keyDown","value":"0"}));
+                actions.push(serde_json::json!({"type":"keyUp","value":"0"}));
+            }
+        }
+        actions.push(serde_json::json!({"type":"keyUp","value":"\u{e009}"}));
+        bidi.call("input.performActions", serde_json::json!({
+            "context": context,
+            "actions": [{"type":"key","id":"mediabridge-page-zoom","actions":actions}]
+        }))?;
+        bidi.cached_at = None;
+        return Ok(());
+    }
+    let video_state = bidi.evaluate(&context, "JSON.stringify({hasVideo:!!document.querySelector('video')})")?;
+    if video_state.get("hasVideo").and_then(|value| value.as_bool()) != Some(true) {
+        return Err("the active LibreWolf page does not expose a controllable HTML video".into());
+    }
     let expression = match operation {
         "pause" => "(() => { const v=document.querySelector('video'); if (!v) throw Error('video unavailable'); v.pause(); return 'ok'; })()".to_string(),
         "resume" => "(() => { const v=document.querySelector('video'); if (!v) throw Error('video unavailable'); v.play(); return 'ok'; })()".to_string(),
@@ -2679,8 +2750,7 @@ fn stop_current(state: &mut State) -> Result<(), String> {
     let mut close_error = None;
     let mut librewolf_closed = false;
     #[cfg(any(windows, target_os = "linux"))]
-    if let Some(item) = state.current.as_ref().filter(|item| !item.local_playback && item.browser.as_deref().is_some_and(|browser| browser.to_ascii_lowercase().contains("librewolf"))) {
-        let url = item.url.clone();
+    if state.current.as_ref().is_some_and(|item| !item.local_playback && item.browser.as_deref().is_some_and(|browser| browser.to_ascii_lowercase().contains("librewolf"))) {
         if state.librewolf_bidi.is_none() {
             match librewolf_bidi_session() {
                 Ok(session) => state.librewolf_bidi = Some(session),
@@ -2688,13 +2758,6 @@ fn stop_current(state: &mut State) -> Result<(), String> {
             }
         }
         if let Some(bidi) = state.librewolf_bidi.as_mut() {
-            if bidi.context_id.is_none() {
-                match bidi.context_for(&url) {
-                    Ok(Some(_)) => {},
-                    Ok(None) => close_error = Some("the video tab could not be identified".into()),
-                    Err(error) => close_error = Some(error),
-                }
-            }
             match bidi.close_browser() {
                 Ok(()) => librewolf_closed = true,
                 Err(error) => close_error = Some(error),
@@ -2891,6 +2954,40 @@ fn queue_status(state: &State) -> Vec<QueueItemStatus> {
     }).collect()
 }
 
+fn request_host_sleep() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        thread::Builder::new().name("mediabridge-host-sleep".into()).spawn(|| {
+            // Let the HTTP 202 response reach the caller before suspending the host.
+            thread::sleep(Duration::from_secs(1));
+            #[link(name = "PowrProf")]
+            unsafe extern "system" {
+                fn SetSuspendState(hibernate: u8, force: u8, disable_wake_events: u8) -> u8;
+            }
+            // Keep wake events enabled so a configured network adapter can wake the PC.
+            if unsafe { SetSuspendState(0, 0, 0) } == 0 {
+                eprintln!("Windows rejected the sleep request; check the MediaBridge process shutdown privilege and power policy");
+            }
+        }).map(|_| ()).map_err(|error| format!("could not schedule host sleep: {error}"))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        thread::Builder::new().name("mediabridge-host-sleep".into()).spawn(|| {
+            // Let the HTTP 202 response reach the caller before suspending the host.
+            thread::sleep(Duration::from_secs(1));
+            match Command::new("systemctl").arg("suspend").output() {
+                Ok(output) if output.status.success() => {}
+                Ok(output) => eprintln!("Linux rejected the sleep request: {}", String::from_utf8_lossy(&output.stderr).trim()),
+                Err(error) => eprintln!("could not run systemctl suspend: {error}"),
+            }
+        }).map(|_| ()).map_err(|error| format!("could not schedule host sleep: {error}"))
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        Err("host sleep is supported only on Windows and Linux".into())
+    }
+}
+
 fn control_mpv(state: &mut State, operation: &str, value: Option<f64>) -> Result<(), String> {
     let path = state.mpv_socket.as_deref().ok_or("mpv IPC is not active")?;
     let command = match (operation, value) {
@@ -2908,7 +3005,10 @@ fn control_mpv(state: &mut State, operation: &str, value: Option<f64>) -> Result
     mpv_ipc(path, command)?;
     if operation.starts_with("volume") {
         if let Some(volume) = mpv_property(path, "volume").and_then(|value| value.as_f64()) {
-            state.last_mpv_volume = Some((volume / 100.0).clamp(0.0, 1.0));
+            let volume = volume.clamp(0.0, 100.0);
+            state.last_mpv_volume = Some(volume / 100.0);
+            // Keep volume feedback visible briefly after remote or dashboard changes.
+            let _ = mpv_ipc(path, serde_json::json!(["show-text", format!("Volume: {}%", volume.round() as u8), 1500]));
         }
     }
     Ok(())
@@ -3553,12 +3653,23 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         }
         respond(request, 202, "{\"ok\":true}".into(), "application/json"); return;
     }
-    if method == Method::Post && ["/queue/remove", "/queue/move", "/queue/promote"].contains(&path.as_str()) {
+    if method == Method::Post && ["/queue/remove", "/queue/move", "/queue/promote", "/queue/play"].contains(&path.as_str()) {
         let mut body = String::new();
         if request.as_reader().read_to_string(&mut body).is_err() { respond(request, 400, "{\"error\":\"invalid body\"}".into(), "application/json"); return; }
         let parsed: QueueIndexRequest = match serde_json::from_str(&body) { Ok(v) => v, Err(e) => { respond(request, 400, json(&serde_json::json!({"error": e.to_string()})), "application/json"); return; } };
         if parsed.index >= state.queue.len() { respond(request, 404, "{\"error\":\"queue index not found\"}".into(), "application/json"); return; }
-        if path == "/queue/remove" {
+        if path == "/queue/play" {
+            let item = state.queue.remove(parsed.index).expect("validated queue index");
+            if let Some(current) = state.current.clone() { push_history(state, current); }
+            state.playback_epoch = state.playback_epoch.wrapping_add(1);
+            state.playback_error = None;
+            let _ = stop_current(state);
+            match start_url(state, cfg, item) {
+                Ok(()) => respond(request, 202, "{\"ok\":true}".into(), "application/json"),
+                Err(e) => respond(request, 500, json(&serde_json::json!({"error": e})), "application/json"),
+            }
+            return;
+        } else if path == "/queue/remove" {
             state.queue.remove(parsed.index);
         } else if path == "/queue/promote" {
             if let Some(item) = state.queue.get_mut(parsed.index) { item.autoplay_generated = false; }
@@ -3590,7 +3701,15 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         }
         return;
     }
-    if method == Method::Post && ["/pause", "/resume", "/play_pause", "/rewind", "/forward", "/volume_up", "/volume_down"].contains(&path.as_str()) {
+    if method == Method::Post && path == "/sleep" {
+        match request_host_sleep() {
+            Ok(()) => respond(request, 202, "{\"ok\":true}\n".into(), "application/json"),
+            Err(error) if !cfg!(any(windows, target_os = "linux")) => respond(request, 501, json(&serde_json::json!({"error": error})), "application/json"),
+            Err(error) => respond(request, 500, json(&serde_json::json!({"error": error})), "application/json"),
+        }
+        return;
+    }
+    if method == Method::Post && ["/pause", "/resume", "/play_pause", "/rewind", "/forward", "/volume_up", "/volume_down", "/zoom_in", "/zoom_out", "/zoom_reset"].contains(&path.as_str()) {
         let result = match path.as_str() {
             "/pause" => control_media(state, "pause", None),
             "/resume" => control_media(state, "resume", None),
@@ -3598,7 +3717,10 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
             "/rewind" => control_media(state, "rewind", None),
             "/forward" => control_media(state, "forward", None),
             "/volume_up" => control_media(state, "volume_up", None),
-            _ => control_media(state, "volume_down", None),
+            "/volume_down" => control_media(state, "volume_down", None),
+            "/zoom_in" => control_media(state, "zoom_in", None),
+            "/zoom_out" => control_media(state, "zoom_out", None),
+            _ => control_media(state, "zoom_reset", None),
         };
         match result { Ok(_) => respond(request, 200, "{\"ok\":true}".into(), "application/json"), Err(e) => respond(request, 409, json(&serde_json::json!({"error": e})), "application/json") }
         return;

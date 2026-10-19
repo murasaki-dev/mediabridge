@@ -37,12 +37,12 @@ curl -sS -X POST "$BASE_URL/pause"
 
 | Field | Type | Purpose |
 | --- | --- | --- |
-| `url` | string | Media URL to play or queue. Normal media URLs are validated. `smb://` URLs are supported only with `local:true`. |
+| `url` | string | HTTP(S) URL to open or play. Browser playback can open any website; `smb://` URLs are supported only with `local:true`. |
 | `local` | boolean | `true` selects local mpv playback (with yt-dlp for supported sites); otherwise playback uses the browser path. Defaults to `false`. |
 | `quality` | string | For local mpv playback, use `"best"` or a vertical resolution such as `"720"` or `"1080"`. The allowed numeric range is 144–4320. |
 | `screen` | integer | Optional zero-based display index, 0–32. Platform and desktop support determine whether placement is honored. |
 | `subtitles` | boolean | Per-item subtitle preference. |
-| `browser` | string | Optional browser executable/name for browser playback. The managed LibreWolf browser is used by default on supported builds. |
+| `browser` | string | Optional browser executable/name for browser playback, such as `"librewolf"`. Set it to `"librewolf"` to use the managed profile, which can open any HTTP(S) website on supported builds. |
 | `browser_args` | array of strings | Optional extra browser arguments when selecting a browser. |
 | `youtube_mode` | string | YouTube browser mode; `"regular"` is the default and `"tv"` selects the TV/Leanback view. |
 | `youtube_guest` | boolean | Request the YouTube guest experience in browser playback. |
@@ -61,12 +61,20 @@ Applications can inspect the waiting queue through `GET /status`. Use `queue_ite
 
 ### Play or enqueue an item
 
-`POST /play` stops the current item, clears the waiting queue, and starts the submitted item. The old item is retained in playback history for `/previous`.
+`POST /play` stops the current item, clears the waiting queue, and opens or plays the submitted URL. Browser playback can open regular websites as well as media links; MediaBridge reports the page title when it can inspect the active managed LibreWolf tab. Video controls are available when the page exposes a controllable HTML video. The old item is retained in playback history for `/previous`.
 
 ```sh
 curl -sS -X POST "$BASE_URL/play" \
   -H 'Content-Type: application/json' \
   -d '{"url":"https://www.youtube.com/watch?v=VIDEO_ID","local":true,"quality":"1080"}'
+```
+
+To open a regular website in the managed LibreWolf browser, set `browser` explicitly:
+
+```sh
+curl -sS -X POST "$BASE_URL/play" \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com/","browser":"librewolf"}'
 ```
 
 `POST /queue` appends an item after the existing queue. If nothing is playing, it starts the submitted item immediately.
@@ -124,6 +132,13 @@ curl -sS -X POST "$BASE_URL/queue/remove" \
   -H 'Content-Type: application/json' -d '{"index":0}'
 ```
 
+`POST /queue/play` immediately starts a waiting entry selected by its zero-based `index`. The selected entry is removed from the queue, and the interrupted current item is added to playback history so it can be restored with `/previous`. Returns `404` if the queue index does not exist.
+
+```sh
+curl -sS -X POST "$BASE_URL/queue/play" \
+  -H 'Content-Type: application/json' -d '{"index":1}'
+```
+
 `POST /queue/move` reorders a waiting entry. Both `index` and `to` are zero-based positions in the queue.
 
 ```sh
@@ -151,6 +166,9 @@ All controls below use `POST`. They control the active mpv item or managed brows
 | `/forward` | Seek forward by the player's default step. |
 | `/volume_up` | Increase volume by 0.05. |
 | `/volume_down` | Decrease volume by 0.05. |
+| `/zoom_in` | Increase page zoom in the active managed LibreWolf tab. |
+| `/zoom_out` | Decrease page zoom in the active managed LibreWolf tab. |
+| `/zoom_reset` | Reset page zoom in the active managed LibreWolf tab to 100%. |
 
 Example:
 
@@ -162,7 +180,12 @@ curl -sS -X POST "$BASE_URL/rewind"
 curl -sS -X POST "$BASE_URL/forward"
 curl -sS -X POST "$BASE_URL/volume_up"
 curl -sS -X POST "$BASE_URL/volume_down"
+curl -sS -X POST "$BASE_URL/zoom_in"
+curl -sS -X POST "$BASE_URL/zoom_out"
+curl -sS -X POST "$BASE_URL/zoom_reset"
 ```
+
+Zoom commands use LibreWolf's browser-level page zoom and require active playback in the managed LibreWolf tab. Each command changes zoom by one browser step; `/zoom_reset` restores 100%.
 
 `POST /seek` moves to an absolute position in seconds. `position` must be a finite, non-negative number.
 
@@ -188,6 +211,12 @@ curl -sS -X POST "$BASE_URL/volume" \
 curl -sS -X POST "$BASE_URL/previous"
 curl -sS -X POST "$BASE_URL/next"
 curl -sS -X POST "$BASE_URL/close"
+```
+
+`POST /sleep` asks the MediaBridge host to enter system sleep. The request is scheduled shortly after the server returns `202` so the response can reach the caller first. It supports Windows and Linux. On Windows, the MediaBridge process needs the system shutdown privilege; on Linux, the session must be allowed to suspend through `systemd-logind`. A separate Wake-on-LAN sender can wake the host after sleep when Wake-on-LAN is enabled in firmware and for the network adapter. MediaBridge leaves wake events enabled but cannot enable Wake-on-LAN on hardware remotely.
+
+```sh
+curl -sS -X POST "$BASE_URL/sleep"
 ```
 
 ### Host mouse control
@@ -223,7 +252,7 @@ The response exposes the current item separately from the waiting queue. `curren
 | `mirroring` | Whether a Moonlight process is active. |
 | `playback_state` | Player state such as `playing`, `paused`, `idle`, `mirroring`, or `unknown`. |
 | `playback_error` | Current playback error, if reported. |
-| `title`, `artist`, `album` | Current media metadata. |
+| `title`, `artist`, `album` | Current media metadata. For managed LibreWolf pages, `title` reports the document title when its tab can be matched, including pages without a video. |
 | `artwork_url` | Current artwork/thumbnail URL. |
 | `channel_avatar_url`, `channel_banner_url` | Channel artwork URLs when available. |
 | `media_url` | Active media URL reported by the player, if available. |
@@ -348,6 +377,7 @@ Common responses include:
 | `422` | A media URL could not be resolved or cookie access could not be confirmed. |
 | `500` | A player/process/configuration operation failed. |
 | `503` | The asynchronous metadata resolver is unavailable. |
+| `501` | The requested operation is unsupported on this platform. |
 
 Error bodies generally use this shape:
 
