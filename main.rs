@@ -1187,7 +1187,9 @@ fn youtube_url(url: &str) -> bool {
     let Some((scheme, rest)) = url.split_once("://") else { return false; };
     if scheme != "https" && scheme != "http" { return false; }
     let host = rest.split(['/', '?', '#']).next().unwrap_or("").split(':').next().unwrap_or("").to_lowercase();
-    host == "youtube.com" || host.ends_with(".youtube.com") || host == "youtu.be"
+    host == "youtube.com" || host.ends_with(".youtube.com")
+        || host == "youtube-nocookie.com" || host.ends_with(".youtube-nocookie.com")
+        || host == "youtu.be"
 }
 
 fn twitch_url(url: &str) -> bool {
@@ -3587,7 +3589,10 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         let mut parsed: QueueItem = match serde_json::from_str(&body) { Ok(v) => v, Err(e) => { respond(request, 400, json(&serde_json::json!({"error": e.to_string()})), "application/json"); return; } };
         if parsed.autoplay_minutes.is_some_and(|minutes| !(1..=1440).contains(&minutes)) { respond(request, 400, "{\"error\":\"autoplay duration must be from 1 to 1440 minutes\"}".into(), "application/json"); return; }
         parsed.url = match clean_media_url(&parsed.url, false) { Ok(url) => url, Err(e) => { respond(request, 400, json(&serde_json::json!({"error": e})), "application/json"); return; } };
-        if !youtube_url(&parsed.url) || !parsed.url.split_once('?').is_some_and(|(_, query)| query.split('&').any(|part| part.split('=').next() == Some("list"))) {
+        if !youtube_url(&parsed.url) || !parsed.url.split_once('?').is_some_and(|(_, query)| query.split('&').any(|part| {
+            let (key, value) = part.split_once('=').unwrap_or((part, ""));
+            key == "list" && !value.trim().is_empty()
+        })) {
             respond(request, 400, "{\"error\":\"a YouTube playlist link with a list parameter is required\"}".into(), "application/json"); return;
         }
         if parsed.screen.or(current_playback_preferences(cfg).default_screen).is_some_and(|screen| screen > 32) {

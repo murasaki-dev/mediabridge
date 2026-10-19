@@ -232,6 +232,14 @@
     if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(link)) link = 'https://' + link;
     return link;
   }
+  function isYoutubePlaylistUrl(input) {
+    try {
+      const url = new URL(cleanLink(input));
+      const host = url.hostname.toLowerCase();
+      const youtubeHost = host === 'youtu.be' || host === 'youtube.com' || host.endsWith('.youtube.com') || host === 'youtube-nocookie.com' || host.endsWith('.youtube-nocookie.com');
+      return /^https?:$/.test(url.protocol) && youtubeHost && Boolean(url.searchParams.get('list'));
+    } catch { return false; }
+  }
   async function api(path, body, method = 'POST') {
     const options = {method};
     if (body) { options.headers = {'Content-Type':'application/json'}; options.body = JSON.stringify(body); }
@@ -571,7 +579,7 @@
     try {
       const item = itemFromForm();
       const originalUrl = item.url;
-      const isYoutubePlaylist = /^(?:https?:\/\/)?(?:www\.|m\.)?(?:youtube\.com|youtube-nocookie\.com)\//i.test(originalUrl) && /[?&]list=/.test(originalUrl);
+      const isYoutubePlaylist = isYoutubePlaylistUrl(originalUrl);
       const playlistPath = isYoutubePlaylist && path === '/play' ? '/play_playlist' : isYoutubePlaylist && path === '/queue' ? '/queue_playlist' : isYoutubePlaylist && path === '/queue_next' ? '/queue_playlist_next' : null;
       const cachedInfo = previewCache?.url === originalUrl ? previewCache : null;
       if (cachedInfo) {
