@@ -73,7 +73,7 @@ if ! pkg-config --exists gtk+-3.0 appindicator3-0.1; then
   exit 1
 fi
 
-cargo build --release
+cargo build --release --locked
 mkdir -p dist
 tar -C target/release -czf dist/mediabridge-linux-x86_64.tar.gz mediabridge
 echo "Built $ROOT_DIR/dist/mediabridge-linux-x86_64.tar.gz"

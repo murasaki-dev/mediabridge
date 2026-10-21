@@ -146,6 +146,8 @@ No Rust dependencies were added or upgraded for these changes. Submitter IDs rem
 | `MEDIABRIDGE_LOG_STDERR` | On Linux, `1` mirrors file diagnostics to stderr, useful for container logs. |
 | `XDG_STATE_HOME` | On Linux, selects the state root used by MediaBridge's log path. |
 
+The Linux installer creates a private, preserved `~/.config/mediabridge/runtime.env` (or the corresponding `XDG_CONFIG_HOME` location). Its generated launcher loads this trusted shell configuration for desktop/service launches and forwards supported variables into Distrobox. This supplies a persistent place to configure a provider; it does not install one. See [Linux runtime settings](docs/INSTALLATION.md#linux-paths-and-runtime-settings) for setup and restart commands.
+
 ## Access and security
 
 The HTTP API currently has no authentication or HTTPS. A client that can reach the listening address can control playback and, for settings routes, change server preferences. Keep the service on a trusted network and do not forward its port to the public internet. For untrusted networks, place it behind a VPN or an authenticated HTTPS reverse proxy.

@@ -264,20 +264,56 @@ if [[ ! -x "$TMP_DIR/librewolf-extract/squashfs-root/AppRun" ]]; then
 fi
 
 mkdir -p "$APP_DIR" "$BIN_DIR" "$CONFIG_DIR" "$STATE_DIR" "$DESKTOP_DIR" "$SYSTEMD_DIR"
-if [[ "$DISTROBOX_RUNTIME" -eq 1 ]]; then
-  cat > "$BIN_DIR/mediabridge-run" <<EOF
+# Keep deployment-specific provider/decoder settings across reinstalls. This
+# file is trusted shell configuration, never a place for SMB passwords.
+if [[ ! -e "$CONFIG_DIR/runtime.env" ]]; then
+  (umask 077; cat > "$CONFIG_DIR/runtime.env" <<'EOF'
+# Loaded by mediabridge-run for service and desktop launches. Shell syntax.
+MEDIABRIDGE_LOG_STDERR=1
+MEDIABRIDGE_MPV_HWDEC=auto
+# Supply your own provider executable, or configure a companion service.
+# MEDIABRIDGE_SMB_CREDENTIAL_PROVIDER=/absolute/path/to/smb-provider
+# MEDIABRIDGE_SMB_CONFIG_DIR=/absolute/path/to/companion-config
+# MEDIABRIDGE_SMB_ROOM_PORT=8081
+# Never store SMB passwords or service tokens here.
+EOF
+  )
+fi
+chmod 600 "$CONFIG_DIR/runtime.env"
+cat > "$BIN_DIR/mediabridge-run" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
+export XDG_CONFIG_HOME="$(dirname -- "$CONFIG_DIR")"
+export XDG_DATA_HOME="$(dirname -- "$APP_DIR")"
+export XDG_STATE_HOME="$(dirname -- "$STATE_DIR")"
+export MEDIABRIDGE_LIBREWOLF_PROFILE="$APP_DIR/librewolf-profile"
+export MEDIABRIDGE_LIBREWOLF_LAUNCHER="$BIN_DIR/mediabridge-librewolf"
+export MEDIABRIDGE_LOG_STDERR="\${MEDIABRIDGE_LOG_STDERR:-1}"
+if [[ -f "$CONFIG_DIR/runtime.env" ]]; then
+  set -a
+  source "$CONFIG_DIR/runtime.env"
+  set +a
+fi
+EOF
+if [[ "$DISTROBOX_RUNTIME" -eq 1 ]]; then
+  cat >> "$BIN_DIR/mediabridge-run" <<'EOF'
+# Distrobox can filter the parent environment; forward runtime settings explicitly.
+runtime_env=()
+for name in XDG_CONFIG_HOME XDG_DATA_HOME XDG_STATE_HOME \
+  MEDIABRIDGE_LIBREWOLF_PROFILE MEDIABRIDGE_LIBREWOLF_LAUNCHER \
+  MEDIABRIDGE_LIBREWOLF_NO_BIDI MEDIABRIDGE_LOG_STDERR MEDIABRIDGE_MPV_HWDEC \
+  MEDIABRIDGE_SMB_CREDENTIAL_PROVIDER MEDIABRIDGE_SMB_CONFIG_DIR MEDIABRIDGE_SMB_ROOM_PORT; do
+  if [[ -v "$name" ]]; then runtime_env+=("$name=${!name}"); fi
+done
+EOF
+  cat >> "$BIN_DIR/mediabridge-run" <<EOF
 exec distrobox enter --name "$DISTROBOX_NAME" --headless -- env \\
-  "MEDIABRIDGE_LIBREWOLF_PROFILE=$APP_DIR/librewolf-profile" \\
-  "MEDIABRIDGE_LIBREWOLF_LAUNCHER=$BIN_DIR/mediabridge-librewolf" \\
+  "\${runtime_env[@]}" \\
   "PATH=$HOME/.local/bin:$HOME/.deno/bin:/usr/local/bin:/usr/bin:/bin" \\
   "\$@"
 EOF
 else
-  cat > "$BIN_DIR/mediabridge-run" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
+  cat >> "$BIN_DIR/mediabridge-run" <<'EOF'
 exec "$@"
 EOF
 fi
@@ -540,6 +576,8 @@ fi
 echo "Default dashboard address: http://127.0.0.1:8765/ (the configured port may differ)."
 echo "LibreWolf profile and YouTube cookies persist in: $APP_DIR/librewolf-profile"
 echo "MediaBridge logs: $STATE_DIR/mediabridge.log"
+echo "Runtime settings (preserved on reinstall): $CONFIG_DIR/runtime.env"
+echo "SMB: guest playback needs SMB-enabled mpv; authenticated/relay playback needs a separately configured provider."
 if [[ "$NEEDS_SESSION_REFRESH" -eq 1 ]]; then
   echo "No restart is needed to run MediaBridge. Log out and back in later (or restart) only to activate the ydotool input group; you do not need to rerun this installer."
 fi

@@ -1,28 +1,31 @@
 # MediaBridge
 
-MediaBridge is a small LAN-controlled process for sending web video to a TV-connected Linux PC. Its application logic lives in one Rust file. Installers bundle Moonlight for Sunshine streaming. On Linux, the installer also supplies private LibreWolf and Moonlight AppImages for dashboard, browser playback, and game streaming.
+Control media on a Windows or Linux PC from another device on your LAN. MediaBridge provides a browser dashboard and HTTP API for browser video, local mpv playback, and Sunshine/Moonlight streaming.
 
-The separate phone-friendly discovery and remote app is in [`discovery/`](discovery/README.md). It can be run with Docker Compose without changing the MediaBridge player build.
+## What it does
 
-## Build and run
+- Play web links in a managed LibreWolf browser or directly with mpv and yt-dlp.
+- Queue videos and YouTube playlists, reorder entries, replay history, and add batches without losing queued suggestions.
+- Continue with YouTube Mix suggestions, with visible lookup progress and errors.
+- Control playback, seeking, volume, browser zoom, and the host pointer.
+- Reuse local browser sign-ins for playback and background YouTube lookups.
+- Pair Moonlight with a Sunshine host and launch desktop/game streaming.
 
-On Windows, run [`install-deps.bat`](install-deps.bat) to install Rust and the Visual C++ build tools, then build the release executable. The Windows build starts in the notification area without opening a console. Left-click the MediaBridge tray icon to open a live log console; right-click it for **Show logs** and **Quit MediaBridge**. Logs are also saved at `%LOCALAPPDATA%\MediaBridge\mediabridge.log`.
+Local playback starts with **720p and H.264 preferences**, with codec fallbacks and configurable hardware decoding. SMB guest playback requires an SMB-enabled mpv build; authenticated SMB or relay playback requires an external provider. Standalone MediaBridge does not include an SMB login store or file browser. See the [SMB API guide](API.md#smb-credential-providers).
 
-To create a self-contained Windows setup program, run [`build-installer.bat`](build-installer.bat). It rebuilds MediaBridge from the current workspace first, then installs 7-Zip and Inno Setup with winget if needed, downloads the standard x86_64 mpv build, yt-dlp, Deno, the official LibreWolf portable browser, and the official Moonlight x64 portable client, and packages them into `dist\MediaBridge-Setup.exe`. The installer version is read from `Cargo.toml`. It asks which TCP port MediaBridge should use (8765 by default), passes it to the app, and creates a matching private-network firewall rule. The app and runtime tools are installed side by side in `C:\Program Files\MediaBridge`; the generated `unins000.exe` is in that same folder. The post-install action opens the onboarding dashboard in LibreWolf. Starting MediaBridge automatically at Windows sign-in is enabled by default and can be disabled in the installer; it runs in the interactive user session so the tray and browser controls work. Uninstalling stops MediaBridge and removes its startup shortcut, firewall rules, installed files, and bundled LibreWolf profile. Choosing to remove user data also deletes settings and logs under `%LOCALAPPDATA%\MediaBridge`. Windows may ask for administrator approval to install the app and manage its firewall rule. The setup executable is self-contained once built; network access is needed when building it to download the current tool releases.
+## Install
 
-On supported x86_64 glibc Linux distributions, run the installer as your normal desktop user:
+### Linux
+
+Run as your normal desktop user on x86_64 glibc Linux:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/murasaki-dev/mediabridge/main/install-linux.sh | bash
 ```
 
-The single installer detects apt, dnf, pacman, zypper, or xbps; installs MediaBridge's runtime dependencies; downloads the latest LibreWolf AppImage and Moonlight AppImage from their official sources; and installs them with MediaBridge under the current user's home directory. On SteamOS and Bazzite, it instead creates a dedicated Fedora Distrobox for MediaBridge's runtime packages, keeping package installation out of the read-only host image. Those systems need Distrobox and Podman available; the first install downloads the Fedora container image. The app, user service, browser profile, and settings remain in the user's home directory, and the uninstaller removes only the Distrobox it created. This follows the [Distrobox integration model](https://distrobox.it/) and avoids package layering, which [Bazzite recommends using only as a last resort](https://docs.bazzite.gg/Installing_and_Managing_Software/rpm-ostree/); Valve notes that SteamOS packages installed outside Flatpak may be removed by OS updates ([SteamOS FAQ](https://help.steampowered.com/en/faqs/view/671A-4453-E8D2-323C/)).
+The installer downloads the latest MediaBridge release, installs runtime dependencies, and adds private LibreWolf and Moonlight AppImages. It supports apt, dnf, pacman, zypper, and xbps. SteamOS and Bazzite use a dedicated Fedora Distrobox with Podman instead of installing packages on the host image.
 
-The AppImages are extracted for systems that do not provide AppImage/FUSE support. The installer creates a private persistent LibreWolf profile, enables cookie retention for that profile, and enables the MediaBridge user service at login. When run in a desktop session, it opens the onboarding dashboard in LibreWolf. On desktops with a StatusNotifier tray host, the tray menu opens the dashboard in LibreWolf, opens the log file, or quits MediaBridge. Other desktops can still use the application-menu launcher. The dashboard is available at `http://127.0.0.1:8765/`.
-
-To remove the Linux app, run `mediabridge-uninstall`. This stops and removes the user service, launchers, and desktop entries while preserving settings, logs, and browser cookies for a possible reinstall. On SteamOS/Bazzite it also removes the dedicated MediaBridge runtime container, without touching other Distroboxes. Use `mediabridge-uninstall --purge-data` to also delete personal files. System dependencies on traditional distributions stay installed because other programs may use them.
-
-The Linux installer supports both the GitHub Release download flow and installation from a local checkout. With no arguments it downloads `mediabridge-linux-x86_64.tar.gz` from the latest GitHub Release. If that release asset has not been published yet (or GitHub is temporarily unavailable), the installer reports that it could not find a downloadable release; this does not mean the installer or dependency setup is broken. To build and install the current checkout locally:
+A published `mediabridge-linux-x86_64.tar.gz` release asset is required. To build and install a checkout instead:
 
 ```sh
 chmod +x build-linux.sh install-linux.sh
@@ -30,160 +33,52 @@ chmod +x build-linux.sh install-linux.sh
 ./install-linux.sh --local
 ```
 
-The build script creates an x86_64 Linux tarball, not a `.deb`. `--no-autostart` installs without enabling the login service. `--deps-only` installs runtime dependencies without installing MediaBridge.
+The builder requires Rust/Cargo and Linux development libraries. Install with `--no-autostart` to disable login startup, or use `--deps-only` for runtime packages only. Remove the app with `mediabridge-uninstall`; add `--purge-data` to remove settings, logs, and browser data too.
 
-For a foreground source run, install Rust/Cargo separately, then install runtime dependencies with `./install-linux.sh --deps-only`. Build and run with the development runner:
+### Windows
 
-```sh
-chmod +x install-linux.sh run.sh
-./install-linux.sh --deps-only
-```
+Download `MediaBridge-Setup.exe` from [Releases](https://github.com/murasaki-dev/mediabridge/releases), when available. Setup bundles mpv, yt-dlp, Deno, LibreWolf, and Moonlight; it configures the selected LAN port and optional sign-in startup.
 
-Then build and launch the server in the foreground with the existing development runner:
+To build from source, run `install-deps.bat`. To build the self-contained installer, run `build-installer.bat`; packaging also downloads the runtime tools and uses 7-Zip and Inno Setup.
 
-```sh
-./run.sh
-```
+See [installation and troubleshooting](docs/INSTALLATION.md) for paths, runtime settings, logs, and platform limitations.
 
-`build-linux.sh` is the developer-only release builder and requires Rust/Cargo on Linux x86_64. If GTK 3 or AppIndicator development libraries are missing, it detects apt, dnf, pacman, zypper, or xbps and offers to install the matching system packages with `sudo` (set `MEDIABRIDGE_INSTALL_BUILD_DEPS=1` to skip the confirmation prompt). End users installing from a GitHub Release do not need Rust or a compiler. The current portable release target is x86_64 glibc Linux; Alpine/musl and ARM need separate build targets, and a native Linux build is still required for Linux-specific tray libraries.
+## Use it
 
-Local mpv playback and background YouTube metadata/playlist/Mix lookups use the configured browser cookies, including the persistent MediaBridge LibreWolf profile on Linux and Windows. The first dashboard visit shows **Connect your accounts** at the top; dismiss it when finished, and reopen it later from **Settings**. The sign-in buttons restart the managed browser without BiDi, which lets Google sign-in work in the tested Linux setup; this closes the dashboard and stops current playback. After signing in, close LibreWolf and reopen the dashboard, then use **Check** to confirm each site's cookies can be read. YouTube checks validate yt-dlp access to a video and try to show the active channel name and avatar from YouTube's account menu, without OAuth or a Google developer app. Twitch checks confirm that yt-dlp can read the browser and that a Twitch authentication cookie is present; they do not yet validate that session or resolve Twitch profile artwork. Cookie data is read locally and the temporary cookie export is deleted when the check finishes; cookie contents are never included in MediaBridge API responses. The installer provides Python SecretStorage support for Linux cookie access.
+Open **`http://<mediabridge-pc>:8765/`** from another device on the same network, or `http://127.0.0.1:8765/` on the host. Keep MediaBridge running in the logged-in desktop session.
 
-By default, MediaBridge listens on all network interfaces at port 8765. Change the port from **Settings → Server port → Apply and restart**. The dashboard follows the server to its new port. Select **Sunshine / Moonlight** in the Add media **Playback** menu to pair with or connect to a host. Pairing opens Moonlight's PIN screen; enter that PIN in Sunshine, then close Moonlight's success dialog so MediaBridge can confirm the pairing. The Windows installer opens its selected install port in Windows Firewall; after changing it, update the **MediaBridge Server** rule to the new TCP port. Linux setup opens TCP 8765 in active UFW or firewalld configurations; after changing it, add the new port there. The installers do not turn on inactive firewalls or modify unknown firewall managers. The router and network must also allow local devices to reach the PC.
+1. Open **Settings** to choose playback defaults and the server port.
+2. Use **Connect your accounts** to sign in through managed LibreWolf. Close it after signing in, reopen the dashboard, and use **Check** to verify cookie access.
+3. Paste a link, select browser or local playback, then play it now or add it to the queue.
 
-Open `http://<mediabridge-ip>:8765/` on a device on the same network to use the lightweight testing dashboard. It lets you choose browser or local mpv playback, paste and preview links, set a local playback quality cap, manage the queue, and control the current stream. YouTube playlist links are expanded into their available videos in playlist order: **Play now** starts the first video and queues the rest, while **Play last** and **Play next** add the playlist videos to the queue. Queue entries show their resolved title/uploader when yt-dlp can identify them, and can be moved or deleted. The page is embedded into the program at build time.
+For Sunshine streaming, select **Sunshine / Moonlight**, start pairing, and enter Moonlight's PIN on the Sunshine host.
 
-Autoplay can be enabled from the queue card, with an optional timeout, or sent as `autoplay:true` (and optional `autoplay_minutes`) with any queue item. Enabling autoplay immediately searches the current YouTube video, then up to 20 eligible manual queue videos in live queue order, for a usable Mix. One background worker appends up to 20 unseen suggestions. Operational failures retry after 60 seconds; unavailable or duplicate-only Mixes advance to the next candidate. Manual additions preserve existing suggestions and insert before them. YouTube Mix extraction can vary with YouTube availability and may return no entries; it does not block playback startup. Disabling autoplay removes waiting Mix entries but leaves explicit queue items intact. The server can also be controlled with `POST /autoplay`.
+The API has **no authentication or HTTPS**. Use it on a trusted LAN; anyone who can reach its port can control the host. The browser-origin allowlist is not user authentication. After changing the port, update the host firewall rule as needed.
 
-Moonlight is bundled in the Windows and Linux installers. MediaBridge prefers the bundled client for Sunshine streaming and pairing. The packaged Windows build uses Moonlight's normal per-user settings store, so the dashboard-launched client and a normal Moonlight Qt installation use the same pairing identity rather than separate portable-folder settings. The pairing card is remembered by the dashboard browser after Moonlight confirms success. You can select another Moonlight executable with `--moonlight PATH` or `MEDIABRIDGE_MOONLIGHT`; the packaged client is the official [Moonlight Qt](https://github.com/moonlight-stream/moonlight-qt) project. Remote mouse commands use `xdotool` on X11. On Wayland they use `ydotool`, which requires a running `ydotoold` process with permission to access `/dev/uinput`. When the distribution provides a system `ydotool.service`, the installer configures a shared socket and adds the desktop user to the `mediabridge-input` group; log out and back in for the group change to take effect.
-
-Browser playback uses the app-managed LibreWolf profile on Linux and Windows and can open any HTTP(S) website, including pages without video. LibreWolf opens fullscreen; MediaBridge makes one attempt to fullscreen an embedded video on ordinary sites, while supported YouTube and Twitch pages retain their retry behavior. When it can match the active tab, MediaBridge reports the page title; playback controls work when the page exposes a controllable HTML video. MediaBridge uses Firefox WebDriver BiDi over LibreWolf's loopback-only remote debugging interface to read page and video state, control playback and seek/volume, close LibreWolf from **Quit**, and advance through the queue when a video ends. YouTube playlist playback starts the first listed video and queues the rest. yt-dlp is not run to resolve ordinary browser-mode links; it is still used when expanding a YouTube playlist, previewing a link, checking cookies, and by mpv. Alternatively set `local:true` to play supported links directly with mpv; mpv uses the installed `yt-dlp` integration for YouTube, Twitch, and other supported sites. This avoids browser UI automation and uses mpv's local IPC for playback controls and live status. Set `quality` to `"720"`, `"1080"`, or another height from 144 to 4320 to cap the selected stream resolution; omit it to use the saved default (initially 720p), or use `"best"` for an uncapped selection. Preferred codec defaults to H.264, with VP9 and Automatic available in Settings and fallback formats when necessary. To choose a display, set `screen` to a zero-based display index from 0 to 32. This works with local mpv and, on Windows, with managed LibreWolf playback; omit it to let the player or desktop choose. The dashboard has an optional **mpv display index** field. Display selection is platform and window-system dependent; Wayland compositors control window placement, so they may not honor a requested screen. Quality is chosen at start and is not dynamically changed during playback yet. The browser path remains available for sites that require browser login or do not work through yt-dlp.
-
-YouTube's old TV/Leanback web interface is not an officially supported desktop experience. It may still load when Chromium uses a TV user-agent. To try the experimental path with a video link, edit and run `test-youtube-tv.bat`; the script opens `youtube.com/tv#/watch?v=VIDEO_ID` in Chromium's app window and sets `youtube_guest:true`. When enabled, MediaBridge waits for a visible control labeled exactly “Watch as guest” and clicks its verified on-screen position. It does not bypass sign-in or infer a URL parameter; it only selects YouTube's own guest option if the TV page presents it. If the control is missing or the page is not YouTube TV, it sends no click. The TV interface may change or stop working without notice.
-
-Twitch does not document a theater-mode URL parameter. For Chromium requests to a Twitch URL, set `twitch_theater:true` to have MediaBridge wait for the stream player and send Twitch's `Alt+T` theater-mode shortcut. The updated `test-twitch.bat` opts in.
-
-YouTube requests default to regular YouTube. Set `youtube_mode:"tv"` to open the experimental TV/Leanback interface; MediaBridge converts a YouTube video URL to the matching TV URL and supplies the TV browser flags. The updated `test-youtube-tv.bat` tests this option. Regular YouTube mode uses the documented `F` fullscreen shortcut first, then falls back to the visible fullscreen control if needed. See `test-youtube.bat` for a regular-mode test.
-
-The default Moonlight command is `moonlight stream HOST Desktop`. Override the executable with `--moonlight PATH` or `MEDIABRIDGE_MOONLIGHT`, and override the arguments with repeated `--moonlight-arg` options and `{host}` / `{app}` placeholders. These templates allow the target's installed Moonlight version and desired app name to be configured without changing the program.
-
-## Configuration
-
-On Linux, MediaBridge reads `~/.config/mediabridge/mediabridge.json` (or `$XDG_CONFIG_HOME/mediabridge/mediabridge.json`). It migrates an existing configuration beside the executable the first time the new package starts. On Windows, the installer creates `mediabridge.json` beside the executable, grants the installing Windows account permission to update it, and preserves it during upgrades. Open **Settings** in the dashboard to manage allowed remote origins and persistent playback defaults. These changes save to the config file and apply to future playback immediately. If MediaBridge cannot create or save the file, the dashboard reports the error and the existing settings remain active.
-
-Example:
-
-```json
-{
-  "bind": "0.0.0.0:8765",
-  "remote_origin_servers": ["https://party.example"],
-  "default_screen": null,
-  "default_quality": "720",
-  "default_video_codec": "h264",
-  "subtitles": false,
-  "preferred_language": null
-}
-```
-
-`remote_origin_servers` is a list of exact web origins allowed to call MediaBridge from a browser, including scheme and optional port, with no path (for example `https://party.example` or `http://192.168.1.10:8080`). Add each self-hosted web app's origin to each MediaBridge installation that should accept it. These entries configure browser cross-origin access; they do not make MediaBridge connect to those servers. Requests carrying a different web origin are rejected. Same-origin dashboard use and command-line clients without an `Origin` header continue to work. Browser support for reaching local-network services may also require a permission prompt. The API still has no user authentication, so only allow web apps and users you trust.
-
-`bind` sets the listen address and port when no `--bind` command-line argument overrides it. `default_screen` uses a zero-based display index (0–32) for mpv and, on Windows, managed LibreWolf video windows, `default_quality` accepts `best` or a height from 144 to 4320, `subtitles` controls whether mpv requests subtitles by default, and `preferred_language` sets yt-dlp's preferred subtitle language when subtitles are enabled. New installations default to 720p and H.264. Configuration loading migrates missing/null or saved `best` quality defaults to 720p; explicit per-item `quality:"best"` remains uncapped. `default_video_codec` accepts `h264`, `vp9`, or `auto`. The dashboard loads these defaults on startup. Per-request playback values override these defaults where that request field is supplied.
-
-## HTTP API
-
-Queue additions preserve generated suggestions. `/queue` inserts before suggestions unless `at_end:true`; `/queue_next` inserts first. `/queue_batch` accepts 1–200 items with `mode:"next"` or `mode:"last"`, preserving selection order. `/play_preserve_queue` replaces playback while retaining the waiting queue. `/close` preserves session history, exposed newest-first as `history_items` in `/status`. Status also includes metadata duration/failures, caller-supplied submitter IDs, Mix progress/errors, and the active hardware decoder. See [API.md](API.md) for the complete contracts and native SMB provider setup.
-
-For copyable `curl` commands and details for integrating with the HTTP endpoints, see the standalone [MediaBridge HTTP API guide](API.md).
-
-Requests use JSON. No authentication is enabled; control is available to any device that can reach the listening port. Browser playback controls and metadata use Linux MPRIS over the user's desktop D-Bus session; local mpv playback uses a private Unix IPC socket. Run the service as the logged-in desktop user. Both modes work on X11 and Wayland.
-
-| Method | Path | Body | Behavior |
-|---|---|---|---|
-| GET | `/` | — | Testing dashboard |
-| GET | `/status` | — | Queue, playback state/error, media metadata, position, duration, artwork URL, and volume |
-| GET | `/preferences` | — | Public playback defaults used to initialize the dashboard |
-| GET | `/settings/remote-origins` | — | Read the configured browser-origin allowlist |
-| POST | `/settings/remote-origins` | `{"remote_origin_servers":["https://party.example"]}` | Replace and save the browser-origin allowlist |
-| POST | `/settings/preferences` | `{"default_screen":1,"default_quality":"1080","subtitles":true,"preferred_language":"en","cookies_browser":"auto","cookies_profile":null}` | Save persistent playback defaults, including browser-cookie selection |
-| POST | `/settings/cookies/check` | `{"cookies_browser":"auto","cookies_profile":null}` | Verify local browser-cookie access and resolve a YouTube video |
-| GET | `/settings/port` | — | Read the current TCP port |
-| POST | `/settings/port` | `{"port":9000}` | Save a new port, then restart the server and rebind |
-| POST | `/resolve` | `{"url":"https://…"}` | Resolve a pasted link with yt-dlp and return canonical URL, title/uploader, thumbnail, and optional channel artwork when supported |
-| POST | `/play` | `{"url":"https://…","local":true,"quality":"720"}` | Replace current playback with mpv + yt-dlp; omit `quality` for the saved default |
-| POST | `/play` | `{"url":"https://…","local":true,"screen":1}` | Open local mpv fullscreen on display index 1 (zero-based; valid range 0–32) |
-| POST | `/play` | `{"url":"https://…","browser":"chromium","youtube_mode":"regular","youtube_guest":true,"twitch_theater":true}` | Browser playback; browser is optional. YouTube mode defaults to `regular`; `tv` selects Leanback |
-| POST | `/queue` | `{"url":"https://…","local":true,"quality":"1080"}` | Queue a local mpv item; the queue can contain both browser and local items |
-| POST | `/queue` | `{"url":"https://…","browser":"/usr/bin/firefox","browser_args":["--kiosk","{url}"]}` | Queue browser playback; start immediately if idle |
-| POST | `/queue_next` | Same body as `/play` | Insert this item at the front of the queue |
-| POST | `/queue/remove` | `{"index":1}` | Delete a waiting queue item by its zero-based queue position |
-| POST | `/queue/move` | `{"index":2,"to":0}` | Reorder a waiting queue item |
-| POST | `/close` | — | Abort playback and mirroring, disable autoplay, cancel background yt-dlp lookups, and clear the queue |
-| POST | `/pause` | — | Pause playback |
-| POST | `/resume` | — | Resume playback |
-| POST | `/play_pause` | — | Toggle pause/play |
-| POST | `/rewind` | — | Seek backward 5 seconds |
-| POST | `/forward` | — | Seek forward 5 seconds |
-| POST | `/seek` | `{"position":123.5}` | Seek to an absolute position in seconds |
-| POST | `/volume_up` | — | Increase media volume by 0.05 |
-| POST | `/volume_down` | — | Decrease media volume by 0.05 |
-| POST | `/volume` | `{"volume":0.5}` | Set volume from 0.0 to 1.0 |
-| POST | `/mouse` | `{"x":640,"y":360,"action":"click","button":"left"}` | Absolute pointer move/click; `move_relative` accepts `dx`/`dy`, and `click_current` clicks the current pointer position |
-| POST | `/next` | — | Stop current playback and start the next queued URL |
-| POST | `/previous` | — | Return to the previous item and put the interrupted item at the front of the queue |
-| POST | `/sunshine` | `{"host":"host-or-ip","app":"Desktop"}` | Stop playback and launch Moonlight for that host/app (app defaults to `Desktop`) |
-| POST | `/sunshine/pair` | `{"host":"host-or-ip"}` | Open Moonlight's pairing PIN screen for the Sunshine host |
-| GET | `/sunshine/pair/status` | — | Check whether the active Moonlight pairing completed |
-
-Example (HTTP media):
+## Integrate
 
 ```sh
-curl -H 'Content-Type: application/json' \
-  -d '{"url":"https://www.youtube.com/watch?v=…","browser":"chromium"}' http://tv-pc:8765/queue
-```
+curl -X POST http://127.0.0.1:8765/play \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com/video.mp4","local":true}'
 
-For an SMB share, send `{"url":"smb://fileserver/media/movie.mp4","local":true}` to `/play` or `/queue`. MediaBridge passes the SMB URL directly to mpv with yt-dlp disabled. Without a provider reference the share must allow guest access. For authenticated playback, attach `smb_share_id` and configure a credential provider as described in [API.md](API.md#smb-credential-providers). MediaBridge rejects usernames/passwords embedded in submitted SMB URLs. Use `smb://server/share/path/to/file.mp4` (URL-encode spaces). Direct playback needs an SMB-enabled mpv build; the extra FFmpeg package alone does not guarantee SMB support. Providers may instead return a validated seekable loopback relay URL. Explicit SMB playback starts at zero and bypasses yt-dlp. Browser playback and `/resolve` do not accept SMB URLs.
-
-On the MediaBridge machine, test playback and queueing with a public YouTube URL:
-
-```sh
-curl -X POST http://127.0.0.1:8765/play -H 'Content-Type: application/json' \
-  -d '{"url":"https://www.youtube.com/watch?v=dQw4w9WgXcQ","browser":"chromium"}'
-curl -X POST http://127.0.0.1:8765/queue -H 'Content-Type: application/json' \
-  -d '{"url":"https://www.youtube.com/watch?v=jfKfPfyJRdk"}'
 curl http://127.0.0.1:8765/status
+curl -X POST http://127.0.0.1:8765/pause
 ```
 
-Stop playback with `curl -X POST http://127.0.0.1:8765/close`.
+The [HTTP API reference](API.md) covers playback, batch queues, metadata/history, autoplay, settings, hardware decoder reporting, and the SMB provider contract. `/play` replaces the queue; `/play_preserve_queue` retains it. `/close` clears playback and the queue while keeping in-memory session history.
 
-To move or click the Linux host's pointer from another LAN device, send `POST /mouse` with `x` and `y` in screen pixels and `action` set to `move` or `click` (button defaults to `left`). `move_relative` accepts signed `dx`/`dy`; `click_current` clicks without moving. Buttons are `left`, `right`, or `middle`. The dashboard's Host touchpad uses relative movement, so it does not depend on the host's display resolution. Edit and run `test-mouse.bat` on Windows; set `ACTION=move` first to check coordinates without clicking. For example, from PowerShell:
+## Projects behind MediaBridge
 
-```powershell
-Invoke-RestMethod -Method Post -Uri http://192.168.0.200:8765/mouse -ContentType 'application/json' -Body '{"x":960,"y":900,"action":"click","button":"left"}'
-```
+MediaBridge brings together these projects; thanks to their maintainers and contributors:
 
-Adjust the coordinates to the host display resolution and the location of the target. This can be used to click YouTube TV's guest option when its layout is stable; MediaBridge does not guess the coordinates.
+| Project | Role |
+| --- | --- |
+| [mpv](https://mpv.io/) and [FFmpeg](https://ffmpeg.org/) | Local playback and media decoding. Windows packaging uses [zhongfly/mpv-winbuild](https://github.com/zhongfly/mpv-winbuild). |
+| [yt-dlp](https://github.com/yt-dlp/yt-dlp) and [Deno](https://deno.com/) | Media extraction, metadata, playlists, and JavaScript challenge support. |
+| [LibreWolf](https://librewolf.net/), built on [Firefox](https://www.mozilla.org/firefox/), with [uBlock Origin](https://github.com/gorhill/uBlock) | Managed browser playback and persistent sign-in profile. |
+| [Moonlight Qt](https://github.com/moonlight-stream/moonlight-qt) and [Sunshine](https://github.com/LizardByte/Sunshine) | Game and desktop streaming; Sunshine runs separately on the streaming host. |
+| [Distrobox](https://distrobox.it/) and [Podman](https://podman.io/) | Linux runtime isolation on SteamOS/Bazzite. |
+| [Rust](https://www.rust-lang.org/), [GTK](https://www.gtk.org/), and [tray-icon](https://github.com/tauri-apps/tray-icon) | Application, desktop, and tray foundations. |
 
-`GET /status` also returns `playback_state`, `playback_error`, `title`, `artist`, `album`, `artwork_url`, `channel_avatar_url`, `channel_banner_url`, `media_url`, `position_seconds`, `duration_seconds`, `volume`, and `can_seek`. For local mpv playback, MediaBridge detects YouTube bot-verification prompts and HTTP 403 stream errors from mpv's log, prints a readable warning, and exposes it as `playback_error` so the dashboard and future Home Assistant integration can explain why playback failed. It also attempts a native desktop notification through `notify-send`; this uses the freedesktop notification standard over the desktop session bus, supported by common X11 and Wayland desktops. A notification daemon must be active in that session, so this is best-effort; missing notification support never affects playback or queue advancement. The warning remains visible if the queue advances and clears when playback is explicitly replaced or closed. The dashboard shows the current video thumbnail, plus channel avatar/banner when the media extractor provides them. `yt-dlp` usually provides video thumbnails, but channel artwork is extractor-dependent and may be absent. Those metadata fields are refreshed when `/status` is polled, so a future Home Assistant integration can poll it for a live media card and use `/seek` for its progress slider. Browser playback can also provide MPRIS artwork when the browser publishes it.
-
-For media controls, use `curl -X POST http://127.0.0.1:8765/pause`, `/resume`, `/play_pause`, `/rewind`, `/forward`, `/volume_up`, `/volume_down`, or `/next`. To seek to an exact time or set an exact volume:
-
-```sh
-curl -X POST http://127.0.0.1:8765/forward
-curl -X POST http://127.0.0.1:8765/volume_down
-curl -X POST http://127.0.0.1:8765/seek -H 'Content-Type: application/json' -d '{"position":125}'
-curl -X POST http://127.0.0.1:8765/volume -H 'Content-Type: application/json' -d '{"volume":0.5}'
-curl -X POST http://127.0.0.1:8765/next
-```
-
-To start a paired Sunshine host (`192.168.1.50` here), install Moonlight Qt and run:
-
-```sh
-curl -X POST http://127.0.0.1:8765/sunshine -H 'Content-Type: application/json' \
-  -d '{"host":"192.168.1.50","app":"Desktop"}'
-```
-
-Replace the sample host with the Sunshine PC's LAN IP or hostname.
-
-## Current scope
-
-This is an initial prototype. It delegates website playback to a full browser, so playback depends on the site's browser support and may show browser-specific prompts or errors. On Linux, the app-managed LibreWolf AppImage is built for x86_64 glibc systems; other architectures and musl distributions need separate builds. A tray icon appears only when the desktop provides a compatible AppIndicator host or extension; the dashboard and autostart launchers remain available when it does not. The dashboard can start and verify Moonlight pairing, but it does not check Sunshine availability before connecting. BiDi controls and status are enabled for the managed LibreWolf profile; other browsers depend on MPRIS and may provide limited metadata or controls. The Home Assistant integration can poll `/status` for current position and duration, then send `/seek` updates from its progress slider.
+See [project credits](THIRD_PARTY.md) for the direct Rust libraries, Linux desktop tools, packaging tools, and optional SMB companion projects. Components retain their own licenses; the credits list is not a replacement for their license notices.
