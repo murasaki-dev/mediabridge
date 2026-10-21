@@ -90,6 +90,9 @@ fn linux_log_path() -> PathBuf {
 fn append_linux_log(message: String) {
     use std::fs::{self, OpenOptions};
     use std::io::Write as _;
+    if env::var("MEDIABRIDGE_LOG_STDERR").is_ok_and(|value| value == "1") {
+        std::eprintln!("[mediabridge] {message}");
+    }
     let path = linux_log_path();
     if let Some(parent) = path.parent() { let _ = fs::create_dir_all(parent); }
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
@@ -118,6 +121,7 @@ struct Config {
     remote_origin_servers: Vec<String>,
     default_screen: Option<u8>,
     default_quality: Option<String>,
+    default_video_codec: String,
     subtitles: bool,
     preferred_language: Option<String>,
 }
@@ -129,6 +133,7 @@ struct UserConfig {
     remote_origin_servers: Vec<String>,
     default_screen: Option<u8>,
     default_quality: Option<String>,
+    default_video_codec: String,
     subtitles: bool,
     preferred_language: Option<String>,
     cookies_browser: String,
@@ -141,7 +146,8 @@ impl Default for UserConfig {
             bind: "0.0.0.0:8765".into(),
             remote_origin_servers: Vec::new(),
             default_screen: None,
-            default_quality: None,
+            default_quality: Some("720".into()),
+            default_video_codec: "h264".into(),
             subtitles: false,
             preferred_language: None,
             cookies_browser: if cfg!(target_os = "linux") || cfg!(windows) { "librewolf" } else { "auto" }.into(),
@@ -154,6 +160,8 @@ impl Default for UserConfig {
 struct PlaybackPreferences {
     default_screen: Option<u8>,
     default_quality: Option<String>,
+    #[serde(default = "default_video_codec")]
+    default_video_codec: String,
     subtitles: bool,
     preferred_language: Option<String>,
     cookies_browser: String,
@@ -222,8 +230,12 @@ fn load_user_config() -> Result<UserConfig, String> {
     }
     let contents = std::fs::read_to_string(&path)
         .map_err(|e| format!("could not read configuration file {}: {e}", path.display()))?;
-    serde_json::from_str(&contents)
-        .map_err(|e| format!("invalid configuration file {}: {e}", path.display()))
+    let mut config: UserConfig = serde_json::from_str(&contents)
+        .map_err(|e| format!("invalid configuration file {}: {e}", path.display()))?;
+    if config.default_quality.as_deref().is_none_or(|quality| quality.eq_ignore_ascii_case("best")) {
+        config.default_quality = Some("720".into());
+    }
+    Ok(config)
 }
 
 fn normalize_remote_origins(origins: Vec<String>) -> Result<Vec<String>, String> {
@@ -271,6 +283,9 @@ fn validate_preferences(preferences: &PlaybackPreferences) -> Result<(), String>
     if preferences.default_quality.as_deref().is_some_and(|quality| !quality.eq_ignore_ascii_case("best") && quality.parse::<u16>().ok().map_or(true, |h| !(144..=4320).contains(&h))) {
         return Err("default resolution must be 'best' or a height from 144 to 4320".into());
     }
+    if !matches!(preferences.default_video_codec.as_str(), "auto" | "h264" | "vp9") {
+        return Err("video codec preference must be auto, h264, or vp9".into());
+    }
     if preferences.preferred_language.as_deref().is_some_and(|language| language.contains(',') || language.contains('\n') || language.contains('\r')) {
         return Err("preferred subtitle language must not contain commas or line breaks".into());
     }
@@ -284,6 +299,26 @@ fn validate_preferences(preferences: &PlaybackPreferences) -> Result<(), String>
 }
 
 fn default_cookie_browser() -> String { "auto".into() }
+fn default_video_codec() -> String { "h264".into() }
+
+fn ytdl_format_selector(codec: &str, quality: Option<&str>) -> Result<String, String> {
+    let height = match quality.filter(|value| !value.eq_ignore_ascii_case("best")) {
+        Some(value) => Some(value.parse::<u16>().ok().filter(|height| (144..=4320).contains(height))
+            .ok_or("quality must be 'best' or a height from 144 to 4320")?),
+        None => None,
+    };
+    let bounded = |selector: &str| match height {
+        Some(height) => selector.replace("{height}", &height.to_string()),
+        None => selector.replace("[height<={height}]", ""),
+    };
+    let base = match codec {
+        "h264" => "bv*[vcodec~='^(avc1|h264)'][height<={height}]+ba/bv*[vcodec~='^vp0?9'][height<={height}]+ba/bv*[height<={height}]+ba/b[height<={height}]",
+        "vp9" => "bv*[vcodec~='^vp0?9'][height<={height}]+ba/bv*[vcodec~='^(avc1|h264)'][height<={height}]+ba/bv*[height<={height}]+ba/b[height<={height}]",
+        "auto" => "bv*[height<={height}]+ba/b[height<={height}]",
+        _ => return Err("video codec preference must be auto, h264, or vp9".into()),
+    };
+    Ok(bounded(base))
+}
 
 fn save_playback_preferences(preferences: PlaybackPreferences) -> Result<(), String> {
     validate_preferences(&preferences)?;
@@ -291,6 +326,7 @@ fn save_playback_preferences(preferences: PlaybackPreferences) -> Result<(), Str
     let mut config = load_user_config()?;
     config.default_screen = preferences.default_screen;
     config.default_quality = preferences.default_quality.clone();
+    config.default_video_codec = preferences.default_video_codec.clone();
     config.subtitles = preferences.subtitles;
     config.preferred_language = preferences.preferred_language.clone();
     config.cookies_browser = preferences.cookies_browser.clone();
@@ -329,6 +365,7 @@ fn current_playback_preferences(cfg: &Config) -> PlaybackPreferences {
         .map(|value| value.clone()).unwrap_or_else(|| PlaybackPreferences {
             default_screen: cfg.default_screen,
             default_quality: cfg.default_quality.clone(),
+            default_video_codec: cfg.default_video_codec.clone(),
             subtitles: cfg.subtitles,
             preferred_language: cfg.preferred_language.clone(),
             cookies_browser,
@@ -340,7 +377,15 @@ fn current_playback_preferences(cfg: &Config) -> PlaybackPreferences {
 struct QueueItem {
     url: String,
     #[serde(default)]
+    smb_share_id: Option<String>,
+    #[serde(default)]
+    queued_by_user_id: Option<String>,
+    #[serde(default)]
+    duration_seconds: Option<f64>,
+    #[serde(default)]
     title: Option<String>,
+    #[serde(default)]
+    metadata_error: Option<String>,
     #[serde(default)]
     uploader: Option<String>,
     #[serde(default)]
@@ -375,6 +420,12 @@ struct QueueItem {
     autoplay_generated: bool,
 }
 
+#[derive(Deserialize)]
+struct QueueBatchRequest {
+    mode: String,
+    items: Vec<QueueItem>,
+}
+
 #[derive(Default)]
 struct State {
     player: Option<Child>,
@@ -397,11 +448,17 @@ struct State {
     playback_epoch: u64,
     autoplay_enabled: bool,
     autoplay_until: Option<std::time::Instant>,
-    autoplay_tx: Option<Sender<(String, Result<Vec<String>, String>)>>,
-    autoplay_rx: Option<Receiver<(String, Result<Vec<String>, String>)>>,
+    autoplay_tx: Option<Sender<(u64, String, Result<Vec<String>, String>)>>,
+    autoplay_rx: Option<Receiver<(u64, String, Result<Vec<String>, String>)>>,
+    autoplay_generation: u64,
     autoplay_in_flight: Option<String>,
     autoplay_cancel: Option<Arc<AtomicBool>>,
     autoplay_requested_seed: Option<String>,
+    autoplay_retry_at: Option<std::time::Instant>,
+    autoplay_error: Option<String>,
+    autoplay_checked_ids: HashSet<String>,
+    autoplay_scan_root: Option<String>,
+    autoplay_phase: String,
     autoplay_seen_ids: HashSet<String>,
     autoplay_waiting_to_advance: bool,
     last_mpv_volume: Option<f64>,
@@ -456,7 +513,7 @@ struct SeekRequest { position: f64 }
 struct LinkRequest { url: String }
 
 #[derive(Deserialize)]
-struct QueueIndexRequest { index: usize, #[serde(default)] to: Option<usize> }
+struct QueueIndexRequest { index: usize, #[serde(default)] to: Option<usize>, #[serde(default)] queued_by_user_id: Option<String> }
 
 #[derive(Deserialize)]
 struct AutoplayRequest {
@@ -488,6 +545,8 @@ struct PlaybackPreferencesRequest {
     default_screen: Option<u8>,
     #[serde(default)]
     default_quality: Option<String>,
+    #[serde(default = "default_video_codec")]
+    default_video_codec: String,
     #[serde(default)]
     subtitles: bool,
     #[serde(default)]
@@ -503,7 +562,8 @@ struct PortChangeRequest { port: u16 }
 
 impl From<PlaybackPreferencesRequest> for PlaybackPreferences {
     fn from(value: PlaybackPreferencesRequest) -> Self {
-        Self { default_screen: value.default_screen, default_quality: value.default_quality,
+        Self { default_screen: value.default_screen, default_quality: value.default_quality.or_else(|| Some("720".into())),
+            default_video_codec: value.default_video_codec,
             subtitles: value.subtitles, preferred_language: value.preferred_language,
             cookies_browser: value.cookies_browser, cookies_profile: value.cookies_profile }
     }
@@ -535,13 +595,18 @@ fn default_app() -> String { "Desktop".into() }
 
 #[derive(Serialize)]
 struct Status {
+    autoplay_status: String,
+    autoplay_loading: bool,
+    autoplay_error: Option<String>,
     current: Option<String>,
     queued: Vec<String>,
     queue_items: Vec<QueueItemStatus>,
+    history_items: Vec<QueueItemStatus>,
     playing: bool,
     mirroring: bool,
     playback_state: String,
     playback_error: Option<String>,
+    hardware_decoder: Option<String>,
     title: Option<String>,
     artist: Option<String>,
     album: Option<String>,
@@ -561,7 +626,10 @@ struct Status {
 #[derive(Serialize)]
 struct QueueItemStatus {
     url: String,
+    queued_by_user_id: Option<String>,
+    duration_seconds: Option<f64>,
     title: Option<String>,
+    metadata_error: Option<String>,
     uploader: Option<String>,
     thumbnail_url: Option<String>,
     channel_avatar_url: Option<String>,
@@ -576,7 +644,7 @@ fn usage() -> &'static str {
     "mediabridge [--bind IP:PORT] [--moonlight PATH] [--moonlight-arg ARG]... [--cookies-from-browser BROWSER]\n\
      Choose browser and optional browser_args per /play or /queue request.\n\
      If browser is omitted or unavailable, MediaBridge uses the OS default browser.\n\
-     --cookies-from-browser applies yt-dlp browser cookies to local mpv playback only.\n\
+     --cookies-from-browser applies browser cookies to mpv and YouTube metadata, playlists, and Mix lookups.\n\
      Moonlight arguments may contain {host} and {app}; defaults are `stream {host} {app}`."
 }
 
@@ -668,6 +736,9 @@ fn config() -> Result<Config, String> {
     if user.default_quality.as_deref().is_some_and(|quality| !quality.eq_ignore_ascii_case("best") && quality.parse::<u16>().ok().map_or(true, |h| !(144..=4320).contains(&h))) {
         return Err("configuration default_quality must be 'best' or a height from 144 to 4320".into());
     }
+    if !matches!(user.default_video_codec.as_str(), "auto" | "h264" | "vp9") {
+        return Err("configuration default_video_codec must be auto, h264, or vp9".into());
+    }
     if user.preferred_language.as_deref().is_some_and(|language| language.contains(',') || language.contains('\n') || language.contains('\r')) {
         return Err("preferred_language must not contain commas or line breaks".into());
     }
@@ -692,6 +763,7 @@ fn config() -> Result<Config, String> {
         remote_origin_servers,
         default_screen: user.default_screen,
         default_quality: user.default_quality,
+        default_video_codec: user.default_video_codec,
         subtitles: user.subtitles,
         preferred_language: user.preferred_language,
     };
@@ -760,6 +832,18 @@ fn cookie_browser_spec(browser: &str, profile: Option<&str>) -> Result<Option<St
         return Ok(Some(format!("firefox:{}", profile.display())));
     }
     Ok(Some(match profile { Some(profile) => format!("{resolved}:{profile}"), None => resolved }))
+}
+
+fn add_youtube_lookup_cookies(command: &mut Command, url: &str) -> Result<(), String> {
+    if !youtube_url(url) { return Ok(()); }
+    let preferences = PLAYBACK_PREFERENCES.get()
+        .ok_or("playback cookie preferences are not initialized")?
+        .read().map_err(|_| "could not read playback cookie preferences")?.clone();
+    if let Some(spec) = cookie_browser_spec(&preferences.cookies_browser, preferences.cookies_profile.as_deref())? {
+        command.arg("--cookies-from-browser").arg(spec);
+        println!("YouTube background lookup is using the configured browser cookies");
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -1234,6 +1318,7 @@ fn clean_media_url(input: &str, allow_smb: bool) -> Result<String, String> {
         if authority.contains('?') || authority.contains('#') || path.contains('?') || path.contains('#') {
             return Err("SMB links must not contain query strings or fragments".into());
         }
+        if trimmed.chars().any(|character| character.is_control()) { return Err("SMB links must not contain control characters".into()); }
         let mut parts = path.trim_start_matches('/').split('/');
         if parts.next().filter(|share| !share.is_empty()).is_none() || parts.next().filter(|part| !part.is_empty()).is_none() {
             return Err("SMB links must include a share and a media file path".into());
@@ -1284,7 +1369,13 @@ fn run_cancellable_command(mut command: Command, cancel: &AtomicBool) -> Result<
     let mut stderr = child.stderr.take().ok_or("background lookup stderr was unavailable")?;
     let stdout_reader = thread::spawn(move || { let mut bytes = Vec::new(); let _ = stdout.read_to_end(&mut bytes); bytes });
     let stderr_reader = thread::spawn(move || { let mut bytes = Vec::new(); let _ = stderr.read_to_end(&mut bytes); bytes });
+    let started = std::time::Instant::now();
     let status = loop {
+        if started.elapsed() >= Duration::from_secs(90) {
+            terminate_child(&mut child);
+            let _ = stdout_reader.join(); let _ = stderr_reader.join();
+            return Err("background media lookup timed out after 90 seconds".into());
+        }
         if cancel.load(Ordering::Acquire) {
             terminate_child(&mut child);
             let _ = stdout_reader.join(); let _ = stderr_reader.join();
@@ -1302,7 +1393,12 @@ fn run_cancellable_command(mut command: Command, cancel: &AtomicBool) -> Result<
 fn resolve_media_url(url: &str) -> Result<serde_json::Value, String> { resolve_media_url_with_cancel(url, None) }
 
 fn resolve_media_url_with_cancel(url: &str, cancel: Option<&AtomicBool>) -> Result<serde_json::Value, String> {
+    if url.get(..6).is_some_and(|scheme| scheme.eq_ignore_ascii_case("smb://")) {
+        let safe = clean_media_url(url, true)?;
+        return Ok(serde_json::json!({"title": safe.rsplit('/').next().unwrap_or("SMB video")}));
+    }
     let mut command = media_tool_command("yt-dlp");
+    add_youtube_lookup_cookies(&mut command, url)?;
     command.args(["--dump-single-json", "--no-warnings", "--skip-download", "--no-playlist", "--remote-components", "ejs:github", url]);
     add_deno_to_path(&mut command);
     let output = if let Some(cancel) = cancel { run_cancellable_command(command, cancel)? }
@@ -1334,6 +1430,7 @@ fn resolve_media_url_with_cancel(url: &str, cancel: Option<&AtomicBool>) -> Resu
 
 fn expand_youtube_playlist(url: &str) -> Result<Vec<String>, String> {
     let mut command = media_tool_command("yt-dlp");
+    add_youtube_lookup_cookies(&mut command, url)?;
     command.args(["--flat-playlist", "--dump-single-json", "--no-warnings", "--skip-download", url]);
     add_deno_to_path(&mut command);
     let output = command.output().map_err(|e| format!("could not run yt-dlp to read the playlist: {e}"))?;
@@ -1361,20 +1458,49 @@ fn parse_youtube_playlist_json(output: &[u8]) -> Result<Vec<String>, String> {
 
 fn expand_youtube_mix_cancellable(video_url: &str, cancel: &AtomicBool) -> Result<Vec<String>, String> {
     let id = youtube_video_id(video_url).ok_or("could not extract a YouTube video ID for its Mix")?;
-    let url = format!("https://www.youtube.com/watch?v={id}&list=RD{id}&start_radio=1");
-    let mut command = media_tool_command("yt-dlp");
-    command.args(["--flat-playlist", "--dump-single-json", "--no-warnings", "--skip-download", &url]);
-    add_deno_to_path(&mut command);
-    let output = run_cancellable_command(command, cancel)?;
-    if !output.status.success() {
-        let status = output.status;
-        let error = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if error.is_empty() { format!("yt-dlp could not read the YouTube Mix ({status})") } else { error });
+    let urls = [
+        format!("https://www.youtube.com/watch?v={id}&list=RD{id}&start_radio=1"),
+        format!("https://www.youtube.com/playlist?list=RD{id}"),
+    ];
+    let mut failures = Vec::new();
+    for (attempt, url) in urls.iter().enumerate() {
+        if cancel.load(Ordering::Acquire) { return Err("YouTube Mix lookup was cancelled".into()); }
+        let mut command = media_tool_command("yt-dlp");
+        // Application-managed arguments and cookie preferences must not inherit
+        // a user's yt-dlp configuration that changes playlist extraction.
+        command.arg("--ignore-config");
+        add_youtube_lookup_cookies(&mut command, video_url)?;
+        command.args(["--flat-playlist", "--dump-single-json", "--skip-download", "--yes-playlist", "--playlist-end", "40", "--socket-timeout", "10", "--retries", "1", "--extractor-retries", "1", url]);
+        add_deno_to_path(&mut command);
+        let output = run_cancellable_command(command, cancel)?;
+        let diagnostic = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if !output.status.success() {
+            if diagnostic.contains("This playlist type is unviewable") || diagnostic.contains("The playlist does not exist") {
+                failures.push(diagnostic);
+                continue;
+            }
+            return Err(if diagnostic.is_empty() { format!("yt-dlp could not read the YouTube Mix ({})", output.status) } else { diagnostic });
+        }
+        match parse_youtube_playlist_json(&output.stdout) {
+            Ok(videos) => return Ok(videos),
+            Err(error) => {
+                let shape = serde_json::from_slice::<serde_json::Value>(&output.stdout).ok()
+                    .map(|value| format!("type={}, extractor={}", value.get("_type").and_then(|v| v.as_str()).unwrap_or("video"), value.get("extractor_key").and_then(|v| v.as_str()).unwrap_or("unknown")))
+                    .unwrap_or_else(|| "invalid JSON".into());
+                let failure = format!("Mix URL attempt {}: {error} ({shape}). {diagnostic}", attempt + 1);
+                eprintln!("{failure}");
+                failures.push(failure);
+            }
+        }
     }
-    parse_youtube_playlist_json(&output.stdout)
+    Err(format!("NO_MIX: YouTube did not return a usable Mix playlist. {}", failures.join("\n")))
 }
 
 fn update_item_metadata(item: &mut QueueItem, metadata: &serde_json::Value) {
+    item.metadata_error = None;
+    if let Some(duration) = metadata.get("duration_seconds").and_then(|value| value.as_f64()).filter(|duration| duration.is_finite() && *duration > 0.0) {
+        item.duration_seconds = Some(duration);
+    }
     let text = |key: &str| metadata.get(key).and_then(|value| value.as_str()).map(str::to_string);
     if let Some(value) = text("title") { item.title = Some(value); }
     if let Some(value) = text("uploader") { item.uploader = Some(value); }
@@ -1405,7 +1531,16 @@ fn drain_metadata(state: &mut State) {
                     if same_media_url(&item.url, &url) { update_item_metadata(item, &metadata); }
                 }
             }
-            Err(error) => eprintln!("could not resolve background metadata for {}: {error}", safe_media_url(&url)),
+            Err(error) => {
+                let message = format!("Metadata lookup failed: {error}");
+                if let Some(item) = state.current.as_mut().filter(|item| same_media_url(&item.url, &url)) {
+                    item.metadata_error = Some(message.clone());
+                }
+                for item in state.queue.iter_mut().chain(state.history.iter_mut()) {
+                    if same_media_url(&item.url, &url) { item.metadata_error = Some(message.clone()); }
+                }
+                eprintln!("could not resolve background metadata for {}: {error}", safe_media_url(&url));
+            }
         }
     }
 }
@@ -1414,18 +1549,15 @@ fn dispatch_pending_metadata(state: &mut State) {
     if state.metadata_in_flight { return; }
     // Let mpv finish opening its stream before running another yt-dlp process;
     // otherwise metadata extraction competes with the playback extractor.
-    let url = if let Some(url) = state.pending_metadata.pop_front() {
-        if state.current.as_ref().is_some_and(|item| item.local_playback) {
-            let Some(socket) = state.mpv_socket.as_deref() else { state.pending_metadata.push_front(url); return; };
-            if mpv_property(socket, "time-pos").is_none()
-                || mpv_property(socket, "pause").and_then(|value| value.as_bool()) != Some(false) {
-                state.pending_metadata.push_front(url);
-                return;
-            }
-        }
-        url
+    let current_candidate = state.pending_metadata.front().cloned();
+    let current_needs_mpv = current_candidate.as_ref().is_some_and(|url| state.current.as_ref()
+        .is_some_and(|item| item.local_playback && same_media_url(&item.url, url)));
+    let current_ready = !current_needs_mpv || current_playback_started(state);
+    let url = if current_candidate.is_some() && current_ready {
+        state.pending_metadata.pop_front().expect("front metadata item exists")
     } else {
-        if state.pending_queue_metadata.is_empty() || !current_playback_started(state) { return; }
+        // Queue lookups must not depend on playback reporting a started state:
+        // some browser backends do not expose that state consistently.
         let Some(url) = state.pending_queue_metadata.pop_front() else { return; };
         url
     };
@@ -1441,14 +1573,16 @@ fn dispatch_pending_metadata(state: &mut State) {
 }
 
 fn drain_autoplay_results(state: &mut State) {
-    let results: Vec<(String, Result<Vec<String>, String>)> = state.autoplay_rx.as_ref()
+    let results: Vec<(u64, String, Result<Vec<String>, String>)> = state.autoplay_rx.as_ref()
         .map(|receiver| receiver.try_iter().collect()).unwrap_or_default();
-    for (seed, result) in results {
+    for (generation, seed, result) in results {
+        if generation != state.autoplay_generation { continue; }
         if state.autoplay_in_flight.as_deref() == Some(&seed) { state.autoplay_in_flight = None; state.autoplay_cancel = None; }
-        if !state.autoplay_enabled || !state.current.as_ref().is_some_and(|item| same_media_url(&item.url, &seed)) { continue; }
+        if !state.autoplay_enabled { continue; }
+        if !state.current.iter().chain(state.queue.iter()).any(|item| same_media_url(&item.url, &seed)) { continue; }
         match result {
             Ok(urls) => {
-                let Some(template) = state.current.clone() else { continue; };
+                let Some(template) = state.current.iter().chain(state.queue.iter()).find(|item| same_media_url(&item.url, &seed)).cloned() else { continue; };
                 let mut added = 0usize;
                 for url in urls {
                     let Some(id) = youtube_video_id(&url) else { continue; };
@@ -1459,7 +1593,10 @@ fn drain_autoplay_results(state: &mut State) {
                     state.autoplay_seen_ids.insert(id);
                     let mut item = template.clone();
                     item.url = url;
-                    item.title = None; item.uploader = None; item.thumbnail_url = None;
+                    item.queued_by_user_id = None;
+                    item.smb_share_id = None;
+                    item.metadata_error = None;
+                    item.title = None; item.uploader = None; item.thumbnail_url = None; item.duration_seconds = None;
                     item.channel_avatar_url = None; item.channel_banner_url = None;
                     item.autoplay_generated = true;
                     state.pending_queue_metadata.push_back(item.url.clone());
@@ -1467,52 +1604,114 @@ fn drain_autoplay_results(state: &mut State) {
                     added += 1;
                     if added >= 20 { break; }
                 }
-                if added > 0 { println!("Added {added} YouTube Mix videos after {}", safe_media_url(&seed)); }
-                else { eprintln!("YouTube Mix for {} had no new available videos", safe_media_url(&seed)); }
+                if let Some(id) = youtube_video_id(&seed) { state.autoplay_checked_ids.insert(id); }
+                if added > 0 { state.autoplay_phase = "queued".into(); state.autoplay_error = None; println!("Added {added} YouTube Mix videos after {}", safe_media_url(&seed)); }
+                else {
+                    state.autoplay_phase = "searching".into();
+                    state.autoplay_error = None;
+                    eprintln!("YouTube Mix for {} had no new available videos", safe_media_url(&seed));
+                }
             }
-            Err(error) => eprintln!("could not expand the YouTube Mix for {}: {error}", safe_media_url(&seed)),
+            Err(error) => {
+                if error.starts_with("NO_MIX:") {
+                    if let Some(id) = youtube_video_id(&seed) { state.autoplay_checked_ids.insert(id); }
+                    state.autoplay_phase = "searching".into();
+                    state.autoplay_error = None;
+                    state.autoplay_requested_seed = None;
+                    println!("No usable Mix for {}; checking the next eligible queued video", safe_media_url(&seed));
+                    continue;
+                }
+                state.autoplay_phase = "failed".into();
+                state.autoplay_error = Some(error.clone());
+                state.autoplay_requested_seed = None;
+                state.autoplay_retry_at = Some(std::time::Instant::now() + Duration::from_secs(60));
+                eprintln!("could not expand the YouTube Mix for {}: {error}", safe_media_url(&seed));
+            }
         }
     }
 }
 
 fn dispatch_autoplay_mix(state: &mut State) {
-    if !state.autoplay_enabled || !state.queue.is_empty() || state.autoplay_in_flight.is_some()
-        || !current_playback_started(state) { return; }
-    let Some(seed) = state.current.as_ref().filter(|item| youtube_url(&item.url)).map(|item| item.url.clone()) else { return; };
-    request_autoplay_mix(state, seed);
+    if !state.autoplay_enabled || state.autoplay_in_flight.is_some() { return; }
+    if state.queue.iter().any(|item| item.autoplay_generated) { state.autoplay_phase = "queued".into(); return; }
+    let root = state.current.as_ref().map(|item| item.url.clone());
+    if state.autoplay_scan_root != root {
+        state.autoplay_scan_root = root;
+        state.autoplay_checked_ids.clear();
+    }
+    let candidates: Vec<String> = state.current.iter().filter(|item| youtube_video_id(&item.url).is_some())
+        .chain(state.queue.iter().filter(|item| !item.autoplay_generated && youtube_video_id(&item.url).is_some()).take(20))
+        .map(|item| item.url.clone()).collect();
+    if let Some(seed) = candidates.into_iter().find(|url| youtube_video_id(url).is_some_and(|id| !state.autoplay_checked_ids.contains(&id))) {
+        request_autoplay_mix(state, seed);
+    } else { state.autoplay_phase = "no_mix".into(); }
 }
 
 fn request_autoplay_mix(state: &mut State, seed: String) {
-    if !state.autoplay_enabled || !state.queue.is_empty() || state.autoplay_in_flight.is_some() { return; }
+    if !state.autoplay_enabled || state.autoplay_in_flight.is_some() { return; }
+    if state.autoplay_retry_at.is_some_and(|deadline| std::time::Instant::now() < deadline) { return; }
     let Some(id) = youtube_video_id(&seed) else { return; };
     if state.autoplay_requested_seed.as_deref() == Some(&id) { return; }
     let Some(tx) = state.autoplay_tx.clone() else { return; };
     state.autoplay_requested_seed = Some(id.clone());
+    state.autoplay_phase = "searching".into();
     state.autoplay_seen_ids.insert(id);
     state.autoplay_in_flight = Some(seed.clone());
     let cancel = Arc::new(AtomicBool::new(false));
     state.autoplay_cancel = Some(cancel.clone());
-    thread::spawn(move || { let result = expand_youtube_mix_cancellable(&seed, &cancel); let _ = tx.send((seed, result)); });
+    state.autoplay_generation = state.autoplay_generation.wrapping_add(1);
+    let generation = state.autoplay_generation;
+    println!("Starting YouTube Mix lookup for {} (request {generation})", safe_media_url(&seed));
+    thread::spawn(move || { let result = expand_youtube_mix_cancellable(&seed, &cancel); let _ = tx.send((generation, seed, result)); });
 }
 
 fn enqueue_autoplay_item(state: &mut State, item: QueueItem) { state.queue.push_back(item); }
 
 fn enqueue_explicit_item(state: &mut State, item: QueueItem) {
-    state.queue.retain(|queued| !queued.autoplay_generated);
-    state.queue.push_back(item);
+    // Explicit additions take priority over suggestions without discarding
+    // the generated Mix or disturbing the order of existing queue entries.
+    let index = state.queue.iter().position(|queued| queued.autoplay_generated).unwrap_or(state.queue.len());
+    state.queue.insert(index, item);
 }
 
 fn set_autoplay(state: &mut State, enabled: bool, duration_minutes: Option<u64>) {
     state.autoplay_enabled = enabled;
+    state.autoplay_retry_at = None;
+    state.autoplay_checked_ids.clear();
+    state.autoplay_scan_root = state.current.as_ref().map(|item| item.url.clone());
     state.autoplay_until = if enabled { duration_minutes.map(|minutes| std::time::Instant::now() + Duration::from_secs(minutes * 60)) } else { None };
     if !enabled {
+        state.autoplay_generation = state.autoplay_generation.wrapping_add(1);
         if let Some(cancel) = state.autoplay_cancel.take() { cancel.store(true, Ordering::Release); }
         state.autoplay_in_flight = None;
         state.autoplay_waiting_to_advance = false;
+        // Removed suggestions were never played. A manual off/on retry must
+        // be allowed to add them again rather than treating them as seen.
+        let discarded_ids: Vec<String> = state.queue.iter().filter(|item| item.autoplay_generated)
+            .filter_map(|item| youtube_video_id(&item.url)).collect();
+        for id in discarded_ids { state.autoplay_seen_ids.remove(&id); }
         state.queue.retain(|item| !item.autoplay_generated);
         state.autoplay_requested_seed = None;
     } else {
         state.autoplay_requested_seed = None;
+        dispatch_autoplay_mix(state);
+    }
+}
+
+fn autoplay_status_text(state: &State) -> String {
+    if !state.autoplay_enabled { return "Continue with YouTube Mix".into(); }
+    if let Some(seed) = state.autoplay_in_flight.as_deref() {
+        let eligible = state.queue.iter().filter(|item| !item.autoplay_generated && youtube_video_id(&item.url).is_some()).count().min(20);
+        if let Some(index) = state.queue.iter().position(|item| same_media_url(&item.url, seed)) {
+            return format!("Checking queue item {} · {} queued candidates (max 20)", index + 1, eligible);
+        }
+        return format!("Checking current video · {} queued candidates (max 20)", eligible);
+    }
+    match state.autoplay_phase.as_str() {
+        "queued" => "YouTube Mix videos queued".into(),
+        "failed" => "Mix lookup failed · retrying after cooldown".into(),
+        "no_mix" => "No Mix available · waiting for new videos".into(),
+        _ => "Looking for a YouTube Mix".into(),
     }
 }
 
@@ -2399,12 +2598,153 @@ fn playback_error_from_line(line: &str) -> Option<&'static str> {
     }
 }
 
-fn watch_mpv_stderr(stderr: std::process::ChildStderr, epoch: u64, error_tx: Sender<(u64, String)>) {
+#[cfg(test)]
+mod tests;
+
+fn smb_percent_encode(value: &str) -> String {
+    value.bytes().map(|byte| if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+        (byte as char).to_string()
+    } else { format!("%{byte:02X}") }).collect()
+}
+
+// Native providers read one JSON request on stdin and return bounded JSON on
+// stdout. They own credential storage and MUST authorize the URL for the share.
+fn native_smb_credentials(executable: &std::ffi::OsStr, item: &QueueItem) -> Result<serde_json::Value, String> {
+    let request = serde_json::to_vec(&serde_json::json!({"share_id": item.smb_share_id, "url": item.url}))
+        .map_err(|_| "could not encode SMB provider request")?;
+    if request.len() > 16384 { return Err("SMB provider request is too large".into()); }
+    let mut command = Command::new(executable);
+    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+    isolate_process_group(&mut command);
+    let mut child = command.spawn().map_err(|_| "could not start SMB credential provider")?;
+    let mut input = child.stdin.take().ok_or("SMB provider input is unavailable")?;
+    let output = child.stdout.take().ok_or("SMB provider output is unavailable")?;
+    let writer = thread::spawn(move || input.write_all(&request));
+    let (tx, rx) = std::sync::mpsc::channel();
+    let reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = output.take(32769).read_to_end(&mut bytes).map(|_| bytes);
+        let _ = tx.send(result);
+    });
+    let started = std::time::Instant::now();
+    let result = (|| {
+        let bytes = rx.recv_timeout(Duration::from_secs(5)).map_err(|_| "SMB credential provider timed out")?
+            .map_err(|_| "could not read SMB credential provider response")?;
+        if bytes.len() > 32768 { return Err("SMB credential provider response is too large".into()); }
+        loop {
+            match child.try_wait().map_err(|_| "could not read SMB credential provider status")? {
+                Some(status) if status.success() => break,
+                Some(_) => return Err("SMB credential provider rejected the request".into()),
+                None if started.elapsed() >= Duration::from_secs(5) => return Err("SMB credential provider timed out".into()),
+                None => thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        serde_json::from_slice(&bytes).map_err(|_| "invalid SMB credential provider response".into())
+    })();
+    terminate_child(&mut child);
+    let _ = writer.join();
+    let _ = reader.join();
+    result
+}
+
+// Credentials never become part of QueueItem.url. Only private player input
+// receives the authenticated URL. Providers validate the URL-to-share boundary.
+fn smb_authenticated_playback_url(item: &QueueItem) -> Result<Option<String>, String> {
+    let Some(share_id) = item.smb_share_id.as_deref() else { return Ok(None); };
+    if !item.url.to_ascii_lowercase().starts_with("smb://") || share_id.len() != 24 || !share_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("invalid SMB credential reference".into());
+    }
+    let port = env::var("MEDIABRIDGE_SMB_ROOM_PORT").ok().and_then(|value| value.parse::<u16>().ok()).unwrap_or(8081);
+    let credentials: serde_json::Value = if let Some(executable) = env::var_os("MEDIABRIDGE_SMB_CREDENTIAL_PROVIDER") {
+        native_smb_credentials(&executable, item)?
+    } else {
+        let directory = env::var_os("MEDIABRIDGE_SMB_CONFIG_DIR").map(PathBuf::from)
+            .ok_or("SMB credential service is not configured (MEDIABRIDGE_SMB_CONFIG_DIR)")?;
+        let token = std::fs::read_to_string(directory.join("smb-playback.token"))
+            .map_err(|_| "SMB sign-in is unavailable; open Browse SMB shares and sign in again")?;
+        let token = token.trim();
+        if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) { return Err("invalid SMB credential service token".into()); }
+        let address = SocketAddr::from(([127, 0, 0, 1], port));
+        let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(3)).map_err(|_| "SMB credential service is unreachable")?;
+        stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+        stream.set_write_timeout(Some(Duration::from_secs(3))).ok();
+        let request_path = format!("/api/internal/smb-credentials?share={share_id}&url={}", smb_percent_encode(&item.url));
+        stream.write_all(format!("GET {request_path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n").as_bytes())
+            .map_err(|_| "could not request SMB credentials")?;
+        let mut response = Vec::new();
+        stream.take(32769).read_to_end(&mut response).map_err(|_| "could not read SMB credentials")?;
+        if response.len() > 32768 || !response.starts_with(b"HTTP/1.1 200 ") { return Err("SMB credentials unavailable; sign in through Browse SMB shares".into()); }
+        let split = response.windows(4).position(|window| window == b"\r\n\r\n").ok_or("invalid SMB credential response")?;
+        serde_json::from_slice(&response[split + 4..]).map_err(|_| "invalid SMB credential response")?
+        };
+    smb_private_playback_url(&item.url, &credentials, port).map(Some)
+}
+
+fn smb_private_playback_url(url: &str, credentials: &serde_json::Value, port: u16) -> Result<String, String> {
+    if let Some(playback_url) = credentials.get("playback_url").and_then(|value| value.as_str()) {
+        let prefix = format!("http://127.0.0.1:{port}/api/internal/smb-media/");
+        let capability = playback_url.strip_prefix(&prefix).ok_or("invalid SMB relay URL")?;
+        if capability.len() != 64 || !capability.bytes().all(|byte| byte.is_ascii_hexdigit()) { return Err("invalid SMB relay capability".into()); }
+        println!("SMB playback: using seekable loopback relay");
+        return Ok(playback_url.to_string());
+    }
+    let username = credentials.get("username").and_then(|value| value.as_str()).ok_or("SMB username is missing")?;
+    let password = credentials.get("password").and_then(|value| value.as_str()).ok_or("SMB password is missing")?;
+    let domain = credentials.get("domain").and_then(|value| value.as_str()).unwrap_or("");
+    let user = if domain.is_empty() { smb_percent_encode(username) } else { format!("{};{}", smb_percent_encode(domain), smb_percent_encode(username)) };
+    Ok(format!("smb://{user}:{}@{}", smb_percent_encode(password), &url[6..]))
+}
+
+fn smb_playback_error_from_line(line: &str) -> Option<&'static str> {
+    let line = line.to_ascii_lowercase();
+    // Renderer/audio fallbacks can mention missing driver/config files even
+    // while the SMB media is playing. They are not failures to open that media.
+    if line.contains("[vo/") || line.contains("[ao/") || line.contains("vdpau backend") || line.contains("pw.conf") {
+        return None;
+    }
+    if line.contains("protocol not found") || line.contains("no protocol handler") || line.contains("unsupported protocol") {
+        Some("This mpv build cannot play SMB directly. Configure an SMB relay provider or install an SMB-enabled mpv build.")
+    } else if line.contains("nt_status_logon_failure") || line.contains("authentication failed") || line.contains("logon failure") {
+        Some("The SMB server rejected the player's sign-in. Edit the bookmark credentials and check the Windows account/domain.")
+    } else if line.contains("permission denied") || line.contains("access denied") || line.contains("nt_status_access_denied") {
+        Some("The SMB server denied file access. Folder browsing and reading the selected file may have different permissions.")
+    } else if (line.contains("[file]") || line.contains("[ffmpeg]") || line.contains("[lavf]") || line.contains("smb://"))
+        && (line.contains("no such file") || line.contains("file not found") || line.contains("path not found")) {
+        Some("The selected SMB file could not be found. Refresh the folder and queue it again.")
+    } else if line.contains("error parsing option") || line.contains("unrecognized option") || line.contains("option not found") {
+        Some("mpv rejected a playback startup option. Check the installed mpv version and container image.")
+    } else if line.contains("failed to recognize file format") || line.contains("invalid data found") || line.contains("error parsing playlist") || line.contains("playlist is empty") || line.contains("no files to play") {
+        Some("mpv could not recognize the SMB media or its private playlist input.")
+    } else if line.contains("connection refused") || line.contains("connection timed out") || line.contains("no route to host") {
+        Some("mpv could not connect to the SMB server. Check connectivity from the container.")
+    } else if line.contains("failed to open") || line.contains("error opening") || line.contains("cannot open") {
+        Some("mpv could not open the SMB file. Check file permissions, credentials, and SMB protocol support.")
+    } else { None }
+}
+
+fn watch_mpv_output(output: impl Read + Send + 'static, epoch: u64, error_tx: Sender<(u64, String)>, private_smb: bool) {
     thread::spawn(move || {
         let mut reported = false;
-        for line in BufReader::new(stderr).lines() {
+        let mut smb_reports = HashSet::new();
+        let started = std::time::Instant::now();
+        for line in BufReader::new(output).lines() {
             let Ok(line) = line else { break; };
-            eprintln!("{line}");
+            // FFmpeg may print the authenticated URL. Keep error categories,
+            // but never forward raw player output for authenticated SMB.
+            if !private_smb { eprintln!("{line}"); }
+            if private_smb {
+                if line.contains("Exiting... (End of file)") {
+                    println!("SMB player attempt {epoch}: reached end of file after {:.1}s", started.elapsed().as_secs_f64());
+                }
+                if let Some(message) = smb_playback_error_from_line(&line) {
+                    if smb_reports.insert(message) { eprintln!("SMB player: {message}"); }
+                    // Prefer a specific cause over a later generic open failure.
+                    if !reported || !message.starts_with("mpv could not open") {
+                        let _ = error_tx.send((epoch, message.into())); reported = true;
+                    }
+                }
+                continue;
+            }
             if !reported {
                 if let Some(message) = playback_error_from_line(&line) {
                     let _ = error_tx.send((epoch, message.into()));
@@ -2460,9 +2800,15 @@ fn start_url(state: &mut State, cfg: &Config, mut item: QueueItem) -> Result<(),
                 "--window-minimized=no".to_string(),
                 format!("--input-ipc-server={}", socket.display()),
                 "--title=MediaBridge".to_string(), format!("--volume={}", state.last_mpv_volume.map(|v| (v.clamp(0.0, 1.0) * 100.0).round() as u8).unwrap_or(100)), "--volume-max=100".to_string(),
+                // Auto uses an available, supported hardware decoder and falls
+                // back to software decoding when the container has no GPU.
+                format!("--hwdec={}", env::var("MEDIABRIDGE_MPV_HWDEC").unwrap_or_else(|_| "auto".to_string())),
                 "--script-opts=ytdl_hook-ytdl_path=yt-dlp".to_string(),
             ];
-            if item.url.get(..6).is_some_and(|scheme| scheme.eq_ignore_ascii_case("smb://")) { args.push("--ytdl=no".into()); }
+            if item.url.get(..6).is_some_and(|scheme| scheme.eq_ignore_ascii_case("smb://")) {
+                args.extend(["--ytdl=no", "--resume-playback=no", "--start=0", "--save-position-on-quit=no"].map(String::from));
+                println!("Starting SMB playback from 0: {} (account={}, attempt={})", safe_media_url(&item.url), item.smb_share_id.is_some(), state.playback_epoch);
+            }
             let cookie_browser = match cookie_browser_spec(&preferences.cookies_browser, preferences.cookies_profile.as_deref()) {
                 Ok(browser) => browser,
                 Err(error) => { eprintln!("could not select the default cookie browser; continuing without browser cookies: {error}"); None }
@@ -2490,30 +2836,41 @@ fn start_url(state: &mut State, cfg: &Config, mut item: QueueItem) -> Result<(),
                 };
                 args.push(format!("--ytdl-raw-options={raw_options}"));
             }
-            if let Some(quality) = item.quality.as_deref().or(preferences.default_quality.as_deref()) {
-                if !quality.eq_ignore_ascii_case("best") {
-                    let height = quality.parse::<u16>().ok().filter(|h| (144..=4320).contains(h))
-                        .ok_or("quality must be 'best' or a height from 144 to 4320")?;
-                    args.push(format!("--ytdl-format=bv*[height<={height}]+ba/b[height<={height}]"));
-                }
-            }
+            let quality = item.quality.as_deref().or(preferences.default_quality.as_deref());
+            let format_selector = ytdl_format_selector(&preferences.default_video_codec, quality)?;
+            args.push(format!("--ytdl-format={format_selector}"));
             if let Some(screen) = item.screen.or(preferences.default_screen) {
                 args.push(format!("--fs-screen={screen}"));
             }
-            args.push(item.url.clone());
+            let smb_playback_url = smb_authenticated_playback_url(&item)?;
+            if smb_playback_url.is_some() {
+                args.push("--playlist=-".into());
+                args.push("--load-unsafe-playlists".into());
+                args.push("--input-terminal=no".into());
+                args.push(format!("--force-media-title={}", item.title.as_deref().unwrap_or("SMB video")));
+            } else { args.push(item.url.clone()); }
             let mut command = media_tool_command("mpv");
-            command.args(args).stdin(Stdio::null()).stderr(Stdio::piped());
+            command.args(args).stdin(if smb_playback_url.is_some() { Stdio::piped() } else { Stdio::null() }).stderr(Stdio::piped());
+            if smb_playback_url.is_some() { command.stdout(Stdio::piped()); }
             add_deno_to_path(&mut command);
             isolate_process_group(&mut command);
             let mut child = command.spawn()
                 .map_err(|e| format!("could not start mpv; install mpv and yt-dlp: {e}"))?;
+            if let Some(url) = smb_playback_url.as_deref() {
+                let write_result = child.stdin.take().ok_or_else(|| "private SMB player input is unavailable".to_string())
+                    .and_then(|mut input| writeln!(input, "#EXTM3U\n{url}").map_err(|_| "could not send SMB credentials to the player".to_string()));
+                if let Err(error) = write_result { terminate_child(&mut child); return Err(error); }
+            }
             #[cfg(windows)]
             {
                 let mpv_process_id = child.id();
                 thread::spawn(move || raise_mpv_window(mpv_process_id));
             }
             if let (Some(stderr), Some(error_tx)) = (child.stderr.take(), state.player_error_tx.clone()) {
-                watch_mpv_stderr(stderr, state.playback_epoch, error_tx);
+                watch_mpv_output(stderr, state.playback_epoch, error_tx, smb_playback_url.is_some());
+            }
+            if let (Some(stdout), Some(error_tx)) = (child.stdout.take(), state.player_error_tx.clone()) {
+                watch_mpv_output(stdout, state.playback_epoch, error_tx, true);
             }
             println!("Launched mpv for {}", safe_media_url(&item.url));
             mpv_socket = Some(socket);
@@ -2621,6 +2978,11 @@ fn start_url(state: &mut State, cfg: &Config, mut item: QueueItem) -> Result<(),
     state.player = player_child;
     state.mpv_socket = mpv_socket;
     state.current = Some(item);
+    if let Some(current) = state.current.as_ref() {
+        if current.title.is_none() && !state.pending_metadata.iter().any(|url| same_media_url(url, &current.url)) {
+            state.pending_metadata.push_back(current.url.clone());
+        }
+    }
     if let Some(profile) = automation_profile {
         if is_youtube_tv && youtube_guest {
             println!("YouTube TV guest fallback is enabled; waiting for its visible guest control");
@@ -2698,7 +3060,7 @@ fn advance(state: &mut State, cfg: &Config) {
                 let player = if state.current.as_ref().is_some_and(|item| item.local_playback) { "mpv" } else { "browser" };
                 let message = format!("{player} playback process exited with {status}");
                 eprintln!("{message}");
-                state.playback_error = Some(message);
+                if state.playback_error.is_none() { state.playback_error = Some(message); }
             }
             Err(error) => {
                 let message = format!("could not read playback process status: {error}");
@@ -2885,9 +3247,12 @@ fn open_librewolf_sign_in(url: &str) -> Result<Child, String> {
     if !launcher.is_file() {
         return Err(format!("MediaBridge LibreWolf launcher was not found at {}", launcher.display()));
     }
-    Command::new(&launcher).env("MEDIABRIDGE_LIBREWOLF_NO_BIDI", "1").arg(url)
-        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
-        .spawn().map_err(|error| format!("could not open sign-in in bundled LibreWolf: {error}"))
+    eprintln!("Starting LibreWolf sign-in using {}", launcher.display());
+    let child = Command::new(&launcher).env("MEDIABRIDGE_LIBREWOLF_NO_BIDI", "1").arg(url)
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::inherit())
+        .spawn().map_err(|error| format!("could not open sign-in in bundled LibreWolf: {error}"))?;
+    eprintln!("LibreWolf sign-in launcher started with pid {}", child.id());
+    Ok(child)
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
@@ -2947,8 +3312,18 @@ fn mpv_property(path: &Path, property: &str) -> Option<serde_json::Value> {
 }
 
 fn queue_status(state: &State) -> Vec<QueueItemStatus> {
-    state.queue.iter().map(|item| QueueItemStatus {
-        url: safe_media_url(&item.url), title: item.title.clone(), uploader: item.uploader.clone(),
+    status_items(state.queue.iter())
+}
+
+fn history_status(state: &State) -> Vec<QueueItemStatus> {
+    status_items(state.history.iter().rev())
+}
+
+fn status_items<'a>(items: impl Iterator<Item = &'a QueueItem>) -> Vec<QueueItemStatus> {
+    items.map(|item| QueueItemStatus {
+        queued_by_user_id: item.queued_by_user_id.clone(),
+        duration_seconds: item.duration_seconds,
+        url: safe_media_url(&item.url), title: item.title.clone(), metadata_error: item.metadata_error.clone(), uploader: item.uploader.clone(),
         thumbnail_url: item.thumbnail_url.clone(), channel_avatar_url: item.channel_avatar_url.clone(),
         channel_banner_url: item.channel_banner_url.clone(),
         local: item.local_playback, quality: item.quality.clone(), screen: item.screen,
@@ -3261,13 +3636,22 @@ fn media_status(state: &mut State) -> Status {
             let volume = mpv_property(socket, "volume").and_then(|v| v.as_f64()).map(|v| (v / 100.0).clamp(0.0, 1.0));
             if let Some(volume) = volume { state.last_mpv_volume = Some(volume); }
             let paused = mpv_property(socket, "pause").and_then(|v| v.as_bool());
+            let hardware_decoder = Some(
+                mpv_property(socket, "hwdec-current")
+                    .and_then(|value| value.as_str().map(str::to_string))
+                    .map(|decoder| if decoder == "no" { "software".to_string() } else { decoder })
+                    .unwrap_or_else(|| "checking".to_string()),
+            );
             let playback_state = match paused { Some(true) => "paused", Some(false) => "playing", None => "unknown" }.to_string();
             return Status {
+                autoplay_status: autoplay_status_text(state),
+                autoplay_loading: state.autoplay_in_flight.is_some(), autoplay_error: state.autoplay_error.clone(),
                 current: state.current.as_ref().map(|item| safe_media_url(&item.url)),
                 queued: state.queue.iter().map(|item| safe_media_url(&item.url)).collect(),
                 queue_items: queue_status(state),
+                history_items: history_status(state),
                 playing: playback_state == "playing", mirroring: state.mirror.is_some(),
-                playback_state, playback_error: state.playback_error.clone(), title, artist: None, album: None,
+                playback_state, playback_error: state.playback_error.clone(), hardware_decoder, title, artist: None, album: None,
                 artwork_url: state.current.as_ref().and_then(|item| item.thumbnail_url.clone()),
                 channel_avatar_url: state.current.as_ref().and_then(|item| item.channel_avatar_url.clone()),
                 channel_banner_url: state.current.as_ref().and_then(|item| item.channel_banner_url.clone()),
@@ -3310,10 +3694,13 @@ fn media_status(state: &mut State) -> Status {
         else if state.current.is_some() { "unknown".into() }
         else { "idle".into() };
     Status {
+        autoplay_status: autoplay_status_text(state),
+        autoplay_loading: state.autoplay_in_flight.is_some(), autoplay_error: state.autoplay_error.clone(),
         current: state.current.as_ref().map(|item| safe_media_url(&item.url)), queued: state.queue.iter().map(|item| safe_media_url(&item.url)).collect(),
         queue_items: queue_status(state),
+        history_items: history_status(state),
         playing: playback_state == "playing", mirroring: state.mirror.is_some(),
-        playback_state, playback_error: state.playback_error.clone(), title, artist, album, artwork_url, media_url: media_url.map(|url| safe_media_url(&url)), position_seconds,
+        playback_state, playback_error: state.playback_error.clone(), hardware_decoder: None, title, artist, album, artwork_url, media_url: media_url.map(|url| safe_media_url(&url)), position_seconds,
         channel_avatar_url: state.current.as_ref().and_then(|item| item.channel_avatar_url.clone()),
         channel_banner_url: state.current.as_ref().and_then(|item| item.channel_banner_url.clone()),
         duration_seconds, volume, can_seek: duration_seconds.is_some_and(|d| d > 0.0),
@@ -3575,6 +3962,10 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         let value = media_status(state);
         respond(request, 200, json(&value), "application/json"); return;
     }
+    if method == Method::Post && path == "/autoplay/error/clear" {
+        state.autoplay_error = None;
+        respond(request, 200, "{\"ok\":true}".into(), "application/json"); return;
+    }
     if method == Method::Post && path == "/autoplay" {
         let mut body = String::new();
         if request.as_reader().read_to_string(&mut body).is_err() { respond(request, 400, "{\"error\":\"invalid body\"}".into(), "application/json"); return; }
@@ -3616,7 +4007,6 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
             if let Err(e) = start_url(state, cfg, first) { respond(request, 500, json(&serde_json::json!({"error": e})), "application/json"); return; }
             state.queue.extend(items);
         } else if path == "/queue_playlist_next" && state.current.is_some() {
-            state.queue.retain(|item| !item.autoplay_generated);
             for item in items.drain(..).rev() { state.queue.push_front(item); }
         } else if state.current.is_some() {
             for item in items { enqueue_explicit_item(state, item); }
@@ -3632,7 +4022,50 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         }
         respond(request, 202, json(&serde_json::json!({"ok": true, "added": count})), "application/json"); return;
     }
-    if method == Method::Post && ["/play", "/queue", "/queue_next"].contains(&path.as_str()) {
+    if method == Method::Post && path == "/queue_batch" {
+        let mut body = String::new();
+        if request.as_reader().take(1_048_577).read_to_string(&mut body).is_err() || body.len() > 1_048_576 {
+            respond(request, 400, "{\"error\":\"invalid or oversized batch\"}".into(), "application/json"); return;
+        }
+        let mut parsed: QueueBatchRequest = match serde_json::from_str(&body) {
+            Ok(value) => value,
+            Err(error) => { respond(request, 400, json(&serde_json::json!({"error": error.to_string()})), "application/json"); return; }
+        };
+        if !["next", "last"].contains(&parsed.mode.as_str()) || parsed.items.is_empty() || parsed.items.len() > 200 {
+            respond(request, 400, "{\"error\":\"select 1 to 200 videos and choose next or last\"}".into(), "application/json"); return;
+        }
+        // Validate the whole selection before changing playback or the queue.
+        for item in &mut parsed.items {
+            item.url = match clean_media_url(&item.url, item.local_playback) {
+                Ok(url) => url,
+                Err(error) => { respond(request, 400, json(&serde_json::json!({"error": error})), "application/json"); return; }
+            };
+            if item.screen.or(current_playback_preferences(cfg).default_screen).is_some_and(|screen| screen > 32) {
+                respond(request, 400, "{\"error\":\"display index must be from 0 to 32\"}".into(), "application/json"); return;
+            }
+            item.browser = item.browser.take().map(|browser| browser.trim().to_string()).filter(|browser| !browser.is_empty());
+            item.autoplay = None;
+            item.autoplay_minutes = None;
+        }
+        let count = parsed.items.len();
+        if state.current.is_none() {
+            let first = parsed.items.remove(0);
+            let _ = stop_current(state);
+            if let Err(error) = start_url(state, cfg, first) {
+                respond(request, 500, json(&serde_json::json!({"error": error})), "application/json"); return;
+            }
+        }
+        if parsed.mode == "next" {
+            for item in parsed.items.into_iter().rev() { state.queue.push_front(item); }
+        } else { state.queue.extend(parsed.items); }
+        for item in &state.queue {
+            if item.title.is_none() && !state.pending_queue_metadata.iter().any(|url| same_media_url(url, &item.url)) {
+                state.pending_queue_metadata.push_back(item.url.clone());
+            }
+        }
+        respond(request, 202, json(&serde_json::json!({"ok": true, "added": count})), "application/json"); return;
+    }
+    if method == Method::Post && ["/play", "/queue", "/queue_next", "/play_preserve_queue"].contains(&path.as_str()) {
         let mut body = String::new();
         if request.as_reader().read_to_string(&mut body).is_err() { respond(request, 400, "{\"error\":\"invalid body\"}".into(), "application/json"); return; }
         let mut parsed: QueueItem = match serde_json::from_str(&body) { Ok(v) => v, Err(e) => { respond(request, 400, json(&serde_json::json!({"error": e.to_string()})), "application/json"); return; } };
@@ -3644,17 +4077,27 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         if parsed.url.starts_with("smb://") && !parsed.local_playback { respond(request, 400, "{\"error\":\"SMB links require local mpv playback\"}".into(), "application/json"); return; }
         if let Some(enabled) = parsed.autoplay { set_autoplay(state, enabled, parsed.autoplay_minutes); }
         parsed.browser = parsed.browser.map(|b| b.trim().to_string()).filter(|b| !b.is_empty());
-        if path == "/queue_next" && state.current.is_some() { state.queue.retain(|item| !item.autoplay_generated); state.queue.push_front(parsed); }
-        else if path == "/queue" && state.current.is_some() { enqueue_explicit_item(state, parsed); }
+        if path == "/queue_next" && state.current.is_some() {
+            state.queue.push_front(parsed);
+        }
+        else if path == "/queue" && state.current.is_some() {
+            let at_end = serde_json::from_str::<serde_json::Value>(&body).ok().and_then(|value| value.get("at_end").and_then(|value| value.as_bool())).unwrap_or(false);
+            if at_end { state.queue.push_back(parsed); } else { enqueue_explicit_item(state, parsed); }
+        }
         else {
-            if path == "/play" {
+            if path == "/play" || path == "/play_preserve_queue" {
                 state.playback_epoch = state.playback_epoch.wrapping_add(1);
                 state.playback_error = None;
                 if let Some(current) = state.current.clone() { push_history(state, current); }
-                state.queue.clear();
+                if path == "/play" { state.queue.clear(); }
             }
             let _ = stop_current(state);
             if let Err(e) = start_url(state, cfg, parsed) { respond(request, 500, json(&serde_json::json!({"error": e})), "application/json"); return; }
+        }
+        for item in &state.queue {
+            if item.title.is_none() && !state.pending_queue_metadata.iter().any(|url| same_media_url(url, &item.url)) {
+                state.pending_queue_metadata.push_back(item.url.clone());
+            }
         }
         respond(request, 202, "{\"ok\":true}".into(), "application/json"); return;
     }
@@ -3677,7 +4120,10 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         } else if path == "/queue/remove" {
             state.queue.remove(parsed.index);
         } else if path == "/queue/promote" {
-            if let Some(item) = state.queue.get_mut(parsed.index) { item.autoplay_generated = false; }
+            if let Some(item) = state.queue.get_mut(parsed.index) {
+                item.autoplay_generated = false;
+                if let Some(user_id) = parsed.queued_by_user_id { item.queued_by_user_id = Some(user_id); }
+            }
         } else {
             let Some(to) = parsed.to else { respond(request, 400, "{\"error\":\"target queue index is required\"}".into(), "application/json"); return; };
             if to >= state.queue.len() { respond(request, 400, "{\"error\":\"target queue index is out of range\"}".into(), "application/json"); return; }
@@ -3699,7 +4145,6 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         let close_result = stop_current(state);
         if let Some(mut child) = state.mirror.take() { let _ = child.kill(); let _ = child.wait(); }
         state.queue.clear();
-        state.history.clear();
         match close_result {
             Ok(()) => respond(request, 200, "{\"ok\":true}".into(), "application/json"),
             Err(error) => respond(request, 409, json(&serde_json::json!({"error": format!("playback state was cleared but LibreWolf did not confirm it closed: {error}")})), "application/json"),
@@ -3875,6 +4320,7 @@ fn run_server(cfg: Config, shutdown: Option<Arc<AtomicBool>>) -> Result<Option<S
     let _ = PLAYBACK_PREFERENCES.set(RwLock::new(PlaybackPreferences {
         default_screen: cfg.default_screen,
         default_quality: cfg.default_quality.clone(),
+        default_video_codec: cfg.default_video_codec.clone(),
         subtitles: cfg.subtitles,
         preferred_language: cfg.preferred_language.clone(),
         cookies_browser,

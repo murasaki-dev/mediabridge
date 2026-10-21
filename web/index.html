@@ -73,7 +73,10 @@
     <section class="card" aria-labelledby="playback-defaults-heading">
       <h2 id="playback-defaults-heading">Playback defaults</h2>
       <label for="default-quality">Default maximum resolution</label>
-      <select id="default-quality"><option value="">Use player default</option><option value="best">Best available</option><option value="480">480p</option><option value="720">720p</option><option value="1080">1080p</option><option value="1440">1440p</option><option value="2160">2160p</option></select>
+      <select id="default-quality"><option value="2160">4K · 2160p</option><option value="1440">1440p</option><option value="1080">1080p</option><option value="720" selected>720p</option><option value="480">480p</option></select>
+      <label for="default-video-codec">Preferred video codec</label>
+      <select id="default-video-codec"><option value="h264" selected>H.264 first, then VP9</option><option value="vp9">VP9 first, then H.264</option><option value="auto">Automatic selection</option></select>
+      <p class="muted">The preferred codec is tried first; other available formats remain as fallbacks.</p>
       <label for="default-screen">Preferred monitor index</label>
       <input id="default-screen" type="number" min="0" max="32" step="1" placeholder="Automatic">
       <p class="muted">This selects mpv's display on Linux and Windows. On Windows it also selects the display for managed LibreWolf video playback.</p>
@@ -103,7 +106,7 @@
     <textarea id="url" placeholder="https://example.com or smb://server/share/video.mp4"></textarea>
     <div class="row">
       <div><label for="mode">Playback</label><select id="mode"><option value="local">Direct player (mpv + yt-dlp)</option><option value="browser">Web browser</option><option value="sunshine">Sunshine / Moonlight</option></select></div>
-      <div id="quality-wrap"><label for="quality">Maximum quality</label><select id="quality"><option value="best">Best available</option><option>480</option><option>720</option><option>1080</option><option>1440</option><option>2160</option></select></div>
+      <div id="quality-wrap"><label for="quality">Maximum quality</label><select id="quality"><option value="2160">4K · 2160p</option><option value="1440">1440p</option><option value="1080">1080p</option><option value="720" selected>720p</option><option value="480">480p</option></select></div>
       <div id="screen-wrap"><label id="screen-label" for="screen">mpv display index</label><input id="screen" type="number" min="0" max="32" step="1" placeholder="Default" style="width:110px"><small id="screen-help" class="muted">Optional, starts at 0</small></div>
       <div id="browser-wrap" class="hidden"><label for="browser">Browser</label><select id="browser"><option value="chromium">Chromium</option><option value="firefox">Firefox</option><option value="librewolf">MediaBridge LibreWolf</option><option value="">System default</option></select></div>
     </div>
@@ -288,16 +291,10 @@
   };
   loadRemoteOrigins();
   function applyPreferences(preferences) {
-    if (preferences.default_quality && ![...$('default-quality').options].some(option => option.value === preferences.default_quality)) {
-      const option = document.createElement('option'); option.value = preferences.default_quality; option.textContent = `${preferences.default_quality}p`;
-      $('default-quality').append(option);
-    }
-    if (preferences.default_quality && ![...$('quality').options].some(option => option.value === preferences.default_quality)) {
-      const option = document.createElement('option'); option.value = preferences.default_quality; option.textContent = `${preferences.default_quality}p`;
-      $('quality').append(option);
-    }
+    const quality = ['480', '720', '1080', '1440', '2160'].includes(String(preferences.default_quality)) ? String(preferences.default_quality) : '720';
     $('default-screen').value = preferences.default_screen ?? '';
-    $('default-quality').value = preferences.default_quality ?? '';
+    $('default-quality').value = quality;
+    $('default-video-codec').value = ['h264', 'vp9', 'auto'].includes(preferences.default_video_codec) ? preferences.default_video_codec : 'h264';
     $('default-subtitles').checked = !!preferences.subtitles;
     $('preferred-language').value = preferences.preferred_language ?? '';
     const cookieBrowser = preferences.cookies_browser || 'auto';
@@ -306,7 +303,7 @@
       : cookieBrowser;
     $('cookies-profile').value = isLinuxPlatform ? '' : (preferences.cookies_profile ?? '');
     $('screen').value = preferences.default_screen ?? '';
-    $('quality').value = preferences.default_quality || 'best';
+    $('quality').value = quality;
     $('subtitles').checked = !!preferences.subtitles;
   }
   async function loadPreferences() {
@@ -347,6 +344,7 @@
     const preferences = {
       default_screen: rawScreen === '' ? null : Number(rawScreen),
       default_quality: $('default-quality').value || null,
+      default_video_codec: $('default-video-codec').value,
       subtitles: $('default-subtitles').checked,
       preferred_language: language || null,
       cookies_browser: $('cookies-browser').value,
@@ -358,7 +356,7 @@
     const button = $('save-playback-preferences'); button.disabled = true; $('preferences-status').textContent = 'Saving…';
     try {
       const saved = await api('/settings/preferences', preferences);
-      applyPreferences(saved); $('preferences-status').textContent = 'Saved. Playback and cookie defaults apply to future local mpv playback.';
+      applyPreferences(saved); $('preferences-status').textContent = 'Saved. Codec, playback, and cookie defaults apply to future local mpv playback.';
     } catch (error) { $('preferences-status').textContent = error.message; }
     finally { button.disabled = false; }
   };
@@ -720,14 +718,7 @@
   fetch('/preferences', {cache:'no-store'}).then(response => response.ok ? response.json() : null).then(preferences => {
     if (!preferences) return;
     if (preferences.default_screen !== null && preferences.default_screen !== undefined) $('screen').value = String(preferences.default_screen);
-    if (typeof preferences.default_quality === 'string') {
-      if (![...$('quality').options].some(option => option.value === preferences.default_quality)) {
-        const option = document.createElement('option'); option.value = preferences.default_quality;
-        option.textContent = preferences.default_quality === 'best' ? 'Best available' : `${preferences.default_quality}p`;
-        $('quality').append(option);
-      }
-      $('quality').value = preferences.default_quality;
-    }
+    $('quality').value = ['480', '720', '1080', '1440', '2160'].includes(String(preferences.default_quality)) ? String(preferences.default_quality) : '720';
     $('subtitles').checked = !!preferences.subtitles;
   }).catch(() => {});
   refresh(); setInterval(refresh, 1000);
