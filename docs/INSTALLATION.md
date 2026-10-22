@@ -2,12 +2,13 @@
 
 For a quick start, see the [README](../README.md). For HTTP requests and preference fields, see [API.md](../API.md).
 
-For an experimental isolated app/private-runtime package, use
-`bash build-flatpak.sh --install` on Fedora x86_64. The
-[Flatpak build guide](../packaging/flatpak/README.md) covers prerequisites, local
-installation, isolation boundaries and current testing limitations.
+**Flatpak is recommended for Linux.** Download the app/runtime bundles and
+`install-flatpak.sh` / `start-flatpak.sh` from Releases into one folder, then run
+`bash install-flatpak.sh` without sudo. See the
+[Flatpak guide](../packaging/flatpak/README.md) for building, startup, permissions
+and removal. The native installer below remains an alternative.
 
-## Linux installation
+## Native Linux installation
 
 Run `install-linux.sh` as the desktop user; it uses `sudo` for system dependencies. Release installation needs a published `mediabridge-linux-x86_64.tar.gz` asset. `./install-linux.sh --local` uses `dist/mediabridge-linux-x86_64.tar.gz`; an explicit archive path is also accepted. Build that archive on Linux with `./build-linux.sh` and an installed Rust/Cargo toolchain.
 

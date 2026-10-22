@@ -1,147 +1,97 @@
-# Local Fedora Flatpak build (experimental)
+# MediaBridge Flatpak
 
-Copy the entire source checkout, including Cargo.lock, web/, the Steam source
-files and this directory, to an x86_64 Fedora computer. This is a prototype for
-local testing, not a published/Flathub package or a validated SteamOS release.
+Flatpak is the recommended Linux installation, including SteamOS and Bazzite.
+This package includes its own Fedora runtime and playback tools. It is distributed
+as local bundles, not through Flathub; package updates are installed manually.
 
-```sh
-sudo dnf install podman flatpak python3 tar
-bash build-flatpak.sh --install
-flatpak run io.github.murasaki_dev.MediaBridge
-```
+## Install and launch
 
-Run from the checkout's root as your normal desktop user. Omit `--install` to
-only build. Internet, rootless Podman and several GB of free disk space are
-required. Source paths may contain spaces. Nothing is uploaded. Only the first
-command installs host packages; the build never uses sudo. If rootless Podman
-fails, resolve the error reported by `podman info` before retrying.
-Build output and failures are also recorded in `dist/flatpak/build.log`.
-Tool downloads retry transient network/transfer failures and run before Rust
-compilation. If downloads work on the host but fail inside rootless Podman with
-`Network is unreachable`, try
-`MEDIABRIDGE_FLATPAK_NETWORK=host bash build-flatpak.sh --install`.
-This shares networking only with the disposable build container; it does not
-change the installed app's permissions. Check the host connection/proxy first.
-`--install` and `install-flatpak.sh` install the two local bundles without further
-confirmation prompts, then launch the dashboard/server using the detached
-`start-flatpak.sh` helper. Closing the build terminal does not stop that launch.
-Omit `--install` if you want to inspect the bundles first.
+Download these four files from [Releases](https://github.com/murasaki-dev/mediabridge/releases)
+into the same folder, then run `bash install-flatpak.sh` without sudo:
 
-The script uses a disposable Fedora 44 container, compiles with Cargo.lock,
-installs runtime RPMs there, and extracts official LibreWolf/Moonlight AppImages
-without FUSE. Deno and yt-dlp are also downloaded during the build. It exports a
-private Fedora runtime and the application as two local Flatpak bundles:
+- `MediaBridge.flatpak`
+- `MediaBridge-Platform.flatpak`
+- `install-flatpak.sh`
+- `start-flatpak.sh`
 
-```
-dist/flatpak/MediaBridge-Platform.flatpak
-dist/flatpak/MediaBridge.flatpak
-dist/flatpak/install-flatpak.sh
-dist/flatpak/start-flatpak.sh
-```
+Requires Flatpak on x86_64 Linux. If downloaded as an archive, extract it first.
+The helper installs both bundles and launches MediaBridge independently of the
+terminal. Install updates the same way; quit and reopen a running copy afterward.
 
-Copy all four to another x86_64 Linux computer with Flatpak installed, and run
-`bash install-flatpak.sh` there. It installs the runtime first, then the app, for
-the current user. These two bundles supply their own runtime: the test computer
-does not need Distrobox, Podman, Rust, mpv or a runtime download. The local export
-repository is retained under `dist/flatpak/repo` for rebuilding/testing. Updating
-means rebuilding and installing both bundles again; there is no update remote.
-
-This intentionally large private runtime keeps Fedora libraries separate from
-the host distribution. It is not yet the conventional shared-SDK manifest
-proposed earlier. Fedora RPM versions and upstream tool releases are resolved at
-build time; repeated builds can differ. Exact package versions, tool URLs/SHA256s
-and the container image digest are recorded under `/app/share/mediabridge/` in
-the finished app. yt-dlp is checked against its official published checksum list;
-the other download hashes are inventory records, not independently verified
-signatures. `MEDIABRIDGE_FLATPAK_IMAGE` can select a compatible Fedora image digest
-for investigations, but does not pin the RPM repositories or tool releases.
-
-## Running and testing
-
-Launch MediaBridge from GNOME's application grid to run independently of a
-terminal. For a detached terminal launch, use `bash dist/flatpak/start-flatpak.sh`
-from the checkout, or `bash start-flatpak.sh` alongside the copied bundles. Add
-`--background` to start without opening the dashboard. This helper needs no
-rebuild; it starts the already installed app in a separate session and writes
-output to `${XDG_STATE_HOME:-$HOME/.local/state}/mediabridge-flatpak/launcher.log`.
-Bare `flatpak run` below is useful for foreground diagnostics and can stop when
-its terminal closes.
-
-Stop a previous native instance first (`systemctl --user stop mediabridge.service`
-if installed as a user service). The Flatpak refuses to start if its configured
-port is already listening. It does not import native settings or browser cookies.
+Later, launch **MediaBridge** from your application menu, or run:
 
 ```sh
-flatpak run io.github.murasaki_dev.MediaBridge                 # server + dashboard
-flatpak run io.github.murasaki_dev.MediaBridge --background   # server only
-flatpak run io.github.murasaki_dev.MediaBridge --quit         # managed cleanup + exit
-curl http://127.0.0.1:8765/status
+bash start-flatpak.sh                # server + dashboard
+bash start-flatpak.sh --background   # server only
 ```
 
-The launcher is a single-instance GApplication with a Quit action and a Background
-portal request. GNOME can list it under Background Apps and activate the dashboard.
-Missing portal support is logged and does not prevent playback. This needs a live
-graphical session and an appropriate portal backend; KDE/SteamOS has a different
-desktop UI. On first launch after installation, it requests sign-in startup by
-default, subject to desktop approval. **Settings → Startup → Start at sign-in**
-can disable or re-enable it. The saved opt-out survives upgrades and later
-launches. Sign-in launches only the background server, without a dashboard or
-terminal window. Disabling startup does not stop the current session. Portal
-denials, unsupported desktops and pending approval are shown in the dashboard.
-The choice and last confirmed result are stored separately in
-`config/mediabridge/autostart.json`, so saving playback preferences does not reset
-them. This is desktop-session startup, not a system boot service; Steam Deck
-Gaming Mode startup is not verified.
+Sign-in startup is requested by default, subject to desktop approval. Disable it
+in **Settings → Startup**; the choice survives upgrades. Sign-in opens neither a
+terminal nor the dashboard. GNOME's Background Apps entry opens the dashboard;
+its × requests cleanup and quits the app.
 
-Settings, logs, profiles and cookies live under
-`~/.var/app/io.github.murasaki_dev.MediaBridge/`. Tools are read-only under `/app`
-and `/usr` inside the sandbox; the host's `/usr` is not used. Logs normally appear
-under `data`/`state` according to the Flatpak version's XDG_STATE_HOME, or in the
-terminal when launched there. Inspect the actual location with:
+Stop a native MediaBridge instance first: both normally use TCP port 8765.
+Native settings and browser cookies are not imported.
 
-```sh
-flatpak run --command=sh io.github.murasaki_dev.MediaBridge -c 'echo "$XDG_STATE_HOME"'
-```
+## Steam access and limitations
 
-Test local playback, seeks, track switching, remembered choices, browser sign-in,
-browser controls, Moonlight pairing, the close timer and GNOME activation/Quit.
-Fedora's packaged mpv/codecs are used; restricted codec availability and AppImage
-compatibility need testing. Bundled Mesa is intended for Intel/AMD first. NVIDIA
-driver-extension integration has not been added. Wayland pointer/window restrictions
-still apply. The package does not modify firewall rules; LAN access may require
-allowing TCP 8765 (or your configured port) through the host firewall.
-
-## Optional Steam host control
-
-Steam is a host application. Process inspection/closing uses host Python 3 and
-libX11 through `flatpak-spawn --host`. They must exist on the host. Host execution
-is **not granted by default**. To opt into this broad permission for testing:
+**Settings → Steam host access** shows the current permission and setup command:
 
 ```sh
 flatpak override --user --talk-name=org.freedesktop.Flatpak io.github.murasaki_dev.MediaBridge
 ```
 
-Restart the app afterward. This allows the app to execute commands as you outside
-its sandbox; it reduces isolation. Without it, Steam controls report a helper
-failure while sandboxed playback remains available. Native Wayland Steam windows
-are still unsupported by the existing helper. External SMB providers are not
-bundled and must be configured separately; host cookie-store access and Wayland
-pointer injection are not set up by this package.
+Quit and reopen afterward. This optional permission allows commands to run as
+your user outside the sandbox; MediaBridge cannot grant it to itself. Steam
+controls also require host Python 3 and libX11. Playback works without this
+permission. Steam and Sunshine are installed separately on their respective hosts.
 
-The dashboard also exposes **Settings → Steam host access** with this command and
-the current sandbox's effective permission state. It cannot approve its own
-permission or modify the host override. Recheck after quitting/reopening the app;
-the permission is fixed for each sandbox session.
+Steam Deck installation has been tested by the user; Gaming Mode startup remains
+unverified. Wayland restrictions still apply. NVIDIA integration and restricted
+codecs need further testing. External SMB providers are not bundled. The package
+does not change firewall rules; allow your configured TCP port for LAN access.
 
-## Remove
+## Build on Fedora
+
+Copy the complete source folder, including the local build scripts, to x86_64
+Fedora. From its root, as your normal user:
+
+```sh
+sudo dnf install podman flatpak python3 tar
+bash build-flatpak.sh             # build only
+# Or: bash build-flatpak.sh --install
+```
+
+Only the prerequisite command uses sudo. The disposable Fedora 44 build container
+needs internet and several GB of disk space. Both bundles, both helpers and
+`build.log` appear under `dist/flatpak/`. Distribute all four release files together.
+
+If downloads work on the host but Podman reports `Network is unreachable`, use:
+
+```sh
+MEDIABRIDGE_FLATPAK_NETWORK=host bash build-flatpak.sh
+```
+
+This changes build-container networking only. Cargo.lock pins Rust dependencies;
+RPMs and tool releases are resolved during the build. Version/hash inventories
+are recorded in `/app/share/mediabridge/`. The private runtime makes this prototype
+larger than a shared-runtime package.
+
+## Logs and removal
+
+Detached-launch logs default to `~/.local/state/mediabridge-flatpak/launcher.log`.
+App settings, profiles and logs live under
+`~/.var/app/io.github.murasaki_dev.MediaBridge/`. For foreground diagnostics, run
+`flatpak run io.github.murasaki_dev.MediaBridge`.
+
+Discover/GNOME Software can remove the app. The runtime may remain; remove both
+explicitly with:
 
 ```sh
 flatpak uninstall --user io.github.murasaki_dev.MediaBridge
 flatpak uninstall --user io.github.murasaki_dev.MediaBridge.Platform
 ```
 
-Add `--delete-data` to the app removal to erase its settings and browser sign-ins.
-If you enabled the optional host override, remove it with
+Add `--delete-data` to app removal to erase settings and sign-ins. If enabled,
+clear the host-access override with
 `flatpak override --user --reset io.github.murasaki_dev.MediaBridge`.
-The build container is removed automatically; Podman retains the downloaded image
-cache. The host prerequisites remain installed. No separate uninstaller is needed.

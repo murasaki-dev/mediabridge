@@ -19,37 +19,38 @@ Local playback starts with **720p and H.264 preferences**, with codec fallbacks 
 
 ## Install
 
-### Linux
+### Linux — Flatpak recommended
 
-Run as your normal desktop user on x86_64 glibc Linux:
+Requires Flatpak on x86_64 Linux. Download these four files from [Releases](https://github.com/murasaki-dev/mediabridge/releases) into the same folder:
+
+- `MediaBridge.flatpak`
+- `MediaBridge-Platform.flatpak`
+- `install-flatpak.sh`
+- `start-flatpak.sh`
+
+Then run from that folder, without sudo:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/murasaki-dev/mediabridge/main/install-linux.sh | bash
+bash install-flatpak.sh
 ```
 
-The installer downloads the latest MediaBridge release, installs runtime dependencies, and adds private LibreWolf and Moonlight AppImages. It supports apt, dnf, pacman, zypper, and xbps. SteamOS and Bazzite use a dedicated Fedora Distrobox with Podman instead of installing packages on the host image.
+The installer adds the app and its isolated runtime, then opens the dashboard. Later, launch **MediaBridge** from your application menu or run `bash start-flatpak.sh`. Sign-in startup is requested by default; disable it under **Settings → Startup**. Steam host controls need an additional permission; see **Settings → Steam host access**.
 
-A published `mediabridge-linux-x86_64.tar.gz` release asset is required. To build and install a checkout instead:
+For building, removal and platform limitations, see the [Flatpak guide](packaging/flatpak/README.md).
+
+### Linux — native alternative
+
+Download `install-linux.sh` from [Releases](https://github.com/murasaki-dev/mediabridge/releases) and run:
 
 ```sh
-chmod +x build-linux.sh install-linux.sh
-./build-linux.sh
-./install-linux.sh --local
+bash install-linux.sh
 ```
 
-The builder requires Rust/Cargo and Linux development libraries. Install with `--no-autostart` to disable login startup, or use `--deps-only` for runtime packages only. Remove the app with `mediabridge-uninstall`; add `--purge-data` to remove settings, logs, and browser data too.
-
-For an experimental, isolated Linux package built from a checkout, see the
-[local Fedora Flatpak build](packaging/flatpak/README.md). Run
-`bash build-flatpak.sh --install` after installing its listed prerequisites.
+This installs the native release and its dependencies. SteamOS/Bazzite require Distrobox and Podman for this option. Remove it with `mediabridge-uninstall`. See [installation details](docs/INSTALLATION.md) for supported distributions and source builds.
 
 ### Windows
 
-Download `MediaBridge-Setup.exe` from [Releases](https://github.com/murasaki-dev/mediabridge/releases), when available. Setup bundles mpv, yt-dlp, Deno, LibreWolf, and Moonlight; it configures the selected LAN port and optional sign-in startup.
-
-To build from source, run `install-deps.bat`. To build the self-contained installer, run `build-installer.bat`; packaging also downloads the runtime tools and uses 7-Zip and Inno Setup.
-
-See [installation and troubleshooting](docs/INSTALLATION.md) for paths, runtime settings, logs, and platform limitations.
+Download and run `MediaBridge-Setup.exe` from [Releases](https://github.com/murasaki-dev/mediabridge/releases). Setup includes the playback tools and offers launch at sign-in.
 
 ## Use it
 
@@ -86,7 +87,8 @@ MediaBridge brings together these projects; thanks to their maintainers and cont
 | [yt-dlp](https://github.com/yt-dlp/yt-dlp) and [Deno](https://deno.com/) | Media extraction, metadata, playlists, and JavaScript challenge support. |
 | [LibreWolf](https://librewolf.net/), built on [Firefox](https://www.mozilla.org/firefox/), with [uBlock Origin](https://github.com/gorhill/uBlock) | Managed browser playback and persistent sign-in profile. |
 | [Moonlight Qt](https://github.com/moonlight-stream/moonlight-qt) and [Sunshine](https://github.com/LizardByte/Sunshine) | Game and desktop streaming; Sunshine runs separately on the streaming host. |
-| [Distrobox](https://distrobox.it/) and [Podman](https://podman.io/) | Linux runtime isolation on SteamOS/Bazzite. |
+| [Flatpak](https://flatpak.org/) and [Fedora](https://fedoraproject.org/) | Recommended Linux package and its isolated runtime. |
+| [Distrobox](https://distrobox.it/) and [Podman](https://podman.io/) | Native runtime on SteamOS/Bazzite and container-based Flatpak builds. |
 | [Rust](https://www.rust-lang.org/), [GTK](https://www.gtk.org/), and [tray-icon](https://github.com/tauri-apps/tray-icon) | Application, desktop, and tray foundations. |
 
 See [project credits](THIRD_PARTY.md) for the direct Rust libraries, Linux desktop tools, packaging tools, and optional SMB companion projects. Components retain their own licenses; the credits list is not a replacement for their license notices.
