@@ -719,6 +719,31 @@ curl -sS -X POST "$BASE_URL/resolve_async" \
 
 ## Server and playback settings
 
+### Flatpak sign-in startup
+
+`GET /settings/autostart` returns `supported`, `enabled` (boolean or null),
+`requested`, `pending`, and `error` (string or null). Supported only by the Flatpak
+launcher. `enabled` is the last desktop-portal-confirmed result, not a fresh check
+of changes made externally in desktop settings. New Flatpak installations request
+startup on first launch; a saved opt-out persists across upgrades.
+
+`POST /settings/autostart` with `{"enabled":false}` disables sign-in startup;
+`{"enabled":true}` requests it. Returns `202` after handing the request to the
+desktop launcher. Poll GET until `pending:false`, then check `enabled` and `error`.
+The desktop may display an approval dialog on the server computer. Cancellation,
+denial, a 120-second approval timeout, or missing portal support is reported as an
+error rather than assumed success. Returns `409` outside Flatpak or while another
+request is pending, `400` for invalid bodies (limit 4096 bytes), and `503` when the
+desktop launcher cannot be contacted. This is a settings route with the same
+origin restrictions as other `/settings/` routes.
+
+Sign-in starts the server without opening the dashboard or a terminal. Disabling
+startup leaves the current session running. This controls desktop sign-in, not
+system boot or verified Steam Deck Gaming Mode startup. No host-execution
+permission is needed; it uses the XDG Background portal.
+
+### Playback preferences
+
 These routes are intended for local dashboard/configuration use. They accept `Origin`-less HTTP clients, but browsers cannot use them cross-origin.
 
 `GET /preferences` returns saved playback defaults: `default_screen`, `default_quality`, `default_video_codec`, `subtitles`, `preferred_language`, `track_preferences`, `cookies_browser`, and `cookies_profile`.

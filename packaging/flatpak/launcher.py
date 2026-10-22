@@ -8,6 +8,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import urllib.request
 
 import gi
@@ -40,6 +41,9 @@ class MediaBridge(Gio.Application):
         self.stopping = False
         self.failed = False
         self.dashboards = []
+        self.background_pending = False
+        self.background_started = False
+        self.background_generation = 0
 
     def port(self):
         path = Path(os.environ["XDG_CONFIG_HOME"]) / "mediabridge/mediabridge.json"
@@ -64,7 +68,7 @@ class MediaBridge(Gio.Application):
             env["MEDIABRIDGE_LOG_STDERR"] = "1"
             self.child = subprocess.Popen(["/app/bin/mediabridge-server"], env=env)
             GLib.timeout_add(500, self.check_child)
-            self.request_background()
+            GLib.idle_add(self.ensure_background)
         except Exception as error:
             print(f"MediaBridge could not start: {error}", file=sys.stderr, flush=True)
             self.failed = True
@@ -72,10 +76,15 @@ class MediaBridge(Gio.Application):
 
     def do_command_line(self, command):
         args = command.get_arguments()[1:]
-        if any(arg not in ("--background", "--quit") for arg in args):
-            command.printerr("Supported arguments: --background, --quit\n")
+        if any(arg not in ("--background", "--quit", "--autostart=on", "--autostart=off") for arg in args):
+            command.printerr("Supported arguments: --background, --quit, --autostart=on, --autostart=off\n")
             return 2
-        if "--quit" in args:
+        if "--autostart=on" in args or "--autostart=off" in args:
+            if self.background_pending:
+                command.printerr("A desktop permission request is already pending.\n")
+                return 1
+            self.request_background("--autostart=on" in args)
+        elif "--quit" in args:
             self.stop()
         elif "--background" not in args and not self.failed:
             self.activate()
@@ -108,16 +117,73 @@ class MediaBridge(Gio.Application):
         self.quit()
         return False
 
-    def request_background(self):
+    def autostart_path(self):
+        return Path(os.environ["XDG_CONFIG_HOME"]) / "mediabridge/autostart.json"
+
+    def read_autostart(self):
+        try:
+            return json.loads(self.autostart_path().read_text())
+        except FileNotFoundError:
+            return {"enabled": None, "requested": True, "pending": False, "error": None}
+        except (OSError, ValueError):
+            # Do not accidentally re-enable an opt-out if its state cannot be read.
+            return {"enabled": None, "requested": False, "pending": False,
+                    "error": "Could not read the saved sign-in startup choice"}
+
+    def write_autostart(self, state):
+        path = self.autostart_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as output:
+            json.dump(state, output)
+            temporary = output.name
+        try:
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+    def ensure_background(self):
+        if not self.background_started:
+            self.request_background()
+        return False
+
+    def request_background(self, autostart=None):
+        if self.background_pending:
+            return
+        state = self.read_autostart()
+        desired = state.get("requested", True) if autostart is None else autostart
+        state.update(requested=desired, pending=True, error=None)
+        self.write_autostart(state)
+        self.background_pending = True
+        self.background_started = True
+        self.background_generation += 1
+        generation = self.background_generation
         connection = self.get_dbus_connection()
-        token = "mediabridge_background"
+        token = f"mediabridge_background_{self.background_generation}"
         sender = connection.get_unique_name().lstrip(":").replace(".", "_")
         path = f"{PORTAL_PATH}/request/{sender}/{token}"
 
-        def response(_connection, _sender, _path, _interface, _signal, parameters, *_data):
-            code, results = parameters.unpack()
+        def finish(error=None, enabled=None):
+            if not self.background_pending or self.background_generation != generation:
+                return
+            self.background_pending = False
             connection.signal_unsubscribe(subscription)
-            if code == 0 and results.get("background", False):
+            state.update(pending=False, error=error)
+            if enabled is not None:
+                state["enabled"] = enabled
+            self.write_autostart(state)
+
+        def response(_connection, _sender, _path, _interface, _signal, parameters, *_data):
+            if not self.background_pending or self.background_generation != generation:
+                return
+            code, results = parameters.unpack()
+            if code != 0:
+                finish("Desktop startup request was cancelled or denied")
+                return
+            enabled = bool(results.get("autostart", False))
+            error = None if enabled == desired else "The desktop did not apply the requested sign-in startup setting"
+            finish(error, enabled)
+            if results.get("background", False):
                 self.portal_call("SetStatus", GLib.Variant("(a{sv})", ({
                     "message": GLib.Variant("s", "Ready for LAN playback")},)))
             else:
@@ -128,15 +194,27 @@ class MediaBridge(Gio.Application):
                                                     path, None, Gio.DBusSignalFlags.NONE, response)
         self.portal_call("RequestBackground", GLib.Variant("(sa{sv})", ("", {
             "handle_token": GLib.Variant("s", token),
-            "reason": GLib.Variant("s", "Receive playback commands from other devices on your LAN"),
-        })))
+            "reason": GLib.Variant("s", "Receive LAN playback commands and optionally start at sign-in"),
+            "autostart": GLib.Variant("b", desired),
+            "commandline": GLib.Variant("as", ["mediabridge-flatpak", "--background"]),
+        })), on_error=lambda error: finish(error))
 
-    def portal_call(self, method, parameters):
+        def timeout():
+            if self.background_pending and self.background_generation == int(token.rsplit("_", 1)[1]):
+                finish("Desktop startup approval timed out; try again")
+                connection.call(PORTAL, path, "org.freedesktop.portal.Request", "Close", None, None,
+                                Gio.DBusCallFlags.NONE, 5000, None, None)
+            return False
+        GLib.timeout_add_seconds(120, timeout)
+
+    def portal_call(self, method, parameters, on_error=None):
         def completed(connection, result, *_data):
             try:
                 connection.call_finish(result)
             except GLib.Error as error:
                 print(f"Background portal {method} unavailable: {error.message}", file=sys.stderr, flush=True)
+                if on_error is not None:
+                    on_error(f"Desktop portal unavailable: {error.message}")
         self.get_dbus_connection().call(PORTAL, PORTAL_PATH, "org.freedesktop.portal.Background",
                                        method, parameters, None, Gio.DBusCallFlags.NONE, 10000, None, completed)
 

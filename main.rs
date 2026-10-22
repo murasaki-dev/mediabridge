@@ -4053,6 +4053,20 @@ fn platform_info() -> serde_json::Value {
     serde_json::json!({"os": env::consts::OS, "flatpak": flatpak, "steam_host_access_configured": access})
 }
 
+fn autostart_status() -> serde_json::Value {
+    let supported = cfg!(target_os = "linux") && env::var_os("FLATPAK_ID").is_some();
+    let saved = env::var_os("XDG_CONFIG_HOME").map(PathBuf::from)
+        .and_then(|home| std::fs::read_to_string(home.join("mediabridge/autostart.json")).ok())
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+    serde_json::json!({
+        "supported": supported,
+        "enabled": if supported { saved.as_ref().and_then(|s| s.get("enabled")).cloned().unwrap_or(serde_json::Value::Null) } else { serde_json::Value::Null },
+        "requested": supported && saved.as_ref().and_then(|s| s["requested"].as_bool()).unwrap_or(true),
+        "pending": supported && saved.as_ref().and_then(|s| s["pending"].as_bool()).unwrap_or(false),
+        "error": if supported { saved.as_ref().and_then(|s| s.get("error")).cloned().unwrap_or(serde_json::Value::Null) } else { serde_json::Value::Null },
+    })
+}
+
 fn handle(mut request: Request, cfg: &Config, state: &mut State) {
     let method = request.method().clone();
     let path = request.url().split('?').next().unwrap_or("/").to_string();
@@ -4081,6 +4095,37 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
     }
     if method == Method::Get && path == "/platform" {
         respond(request, 200, json(&platform_info()), "application/json"); return;
+    }
+    if path == "/settings/autostart" && (method == Method::Get || method == Method::Post) {
+        let status = autostart_status();
+        if method == Method::Get {
+            respond(request, 200, json(&status), "application/json"); return;
+        }
+        if status["supported"] != true {
+            respond(request, 409, json(&serde_json::json!({"error":"Sign-in startup control is available in the Flatpak package only"})), "application/json"); return;
+        }
+        if status["pending"] == true {
+            respond(request, 409, json(&serde_json::json!({"error":"A desktop permission request is already pending"})), "application/json"); return;
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct AutostartRequest { enabled: bool }
+        let mut body = String::new();
+        if request.as_reader().take(4097).read_to_string(&mut body).is_err() || body.len() > 4096 {
+            respond(request, 400, "{\"error\":\"Invalid or oversized request body\"}".into(), "application/json"); return;
+        }
+        let parsed: AutostartRequest = match serde_json::from_str(&body) {
+            Ok(value) => value,
+            Err(error) => { respond(request, 400, json(&serde_json::json!({"error":error.to_string()})), "application/json"); return; }
+        };
+        let result = Command::new("/app/bin/mediabridge-flatpak")
+            .arg(if parsed.enabled { "--autostart=on" } else { "--autostart=off" })
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+        match result {
+            Ok(exit) if exit.success() => respond(request, 202, json(&autostart_status()), "application/json"),
+            _ => respond(request, 503, "{\"error\":\"Could not contact the desktop launcher; reopen MediaBridge and try again\"}".into(), "application/json"),
+        }
+        return;
     }
     if method == Method::Post && path == "/settings/cookies/check" {
         let mut body = String::new();

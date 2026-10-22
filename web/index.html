@@ -141,6 +141,10 @@
       </details>
       <div class="row" style="margin-top:12px"><button id="save-playback-preferences" class="primary" type="button">Save defaults</button><span id="preferences-status" class="muted" role="status"></span></div>
     </section>
+    </details><details id="autostart-settings" class="settings-group hidden"><summary>Startup</summary>
+      <label><input id="autostart-enabled" type="checkbox" disabled> Start at sign-in</label>
+      <p id="autostart-status" class="muted" role="status">Checking desktop startup…</p>
+      <details class="help"><summary aria-label="Sign-in startup help" aria-describedby="autostart-help">?</summary><div id="autostart-help" role="note">On by default after installation. Your desktop may ask for approval on the MediaBridge computer. Sign-in starts the server in the background without opening the dashboard. Turning this off keeps the current session running. Steam Deck Gaming Mode startup has not been verified.</div></details>
     </details><details id="flatpak-host-settings" class="settings-group hidden"><summary>Steam host access</summary>
       <p id="flatpak-host-status" class="muted" role="status"></p>
       <p class="muted">This permission allows commands to run as your user outside Flatpak. MediaBridge cannot grant it to itself.</p>
@@ -483,12 +487,39 @@
   }
   function renderFlatpakAccess(platform) {
     $('flatpak-host-settings').classList.toggle('hidden', !platform.flatpak);
+    $('autostart-settings').classList.toggle('hidden', !platform.flatpak);
+    if (platform.flatpak) refreshAutostart();
     $('flatpak-host-status').textContent = platform.steam_host_access_configured === true
       ? 'Host execution permission is configured for this session. Steam controls still require the host tools.'
       : platform.steam_host_access_configured === false
         ? 'Host execution permission is not configured for this session.'
         : 'Host execution permission could not be determined.';
   }
+  let autostartPoll = null;
+  function renderAutostart(data) {
+    $('autostart-settings').classList.toggle('hidden', !data.supported);
+    $('autostart-enabled').checked = data.pending ? data.requested : data.enabled === true;
+    $('autostart-enabled').disabled = !data.supported || data.pending;
+    $('autostart-status').textContent = data.pending
+      ? 'Waiting for desktop approval on the MediaBridge computer…'
+      : data.error || (data.enabled === true ? 'Starts in the background at desktop sign-in.'
+        : data.enabled === false ? 'Sign-in startup is off.' : 'The desktop has not confirmed startup yet.');
+    if (autostartPoll !== null) clearTimeout(autostartPoll);
+    autostartPoll = data.pending ? setTimeout(refreshAutostart, 1500) : null;
+  }
+  async function refreshAutostart() {
+    try {
+      const response = await fetch('/settings/autostart', {cache:'no-store'});
+      if (!response.ok) throw new Error('Could not check startup settings');
+      renderAutostart(await response.json());
+    } catch (error) { $('autostart-status').textContent = error.message; }
+  }
+  $('autostart-enabled').onchange = async () => {
+    const enabled = $('autostart-enabled').checked;
+    $('autostart-enabled').disabled = true;
+    try { renderAutostart(await api('/settings/autostart', {enabled})); }
+    catch (error) { await refreshAutostart(); $('autostart-status').textContent = error.message; }
+  };
   $('flatpak-host-recheck').onclick = async () => {
     try {
       const response = await fetch('/platform', {cache:'no-store'});

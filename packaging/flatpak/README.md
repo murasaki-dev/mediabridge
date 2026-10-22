@@ -82,7 +82,16 @@ The launcher is a single-instance GApplication with a Quit action and a Backgrou
 portal request. GNOME can list it under Background Apps and activate the dashboard.
 Missing portal support is logged and does not prevent playback. This needs a live
 graphical session and an appropriate portal backend; KDE/SteamOS has a different
-desktop UI. Login autostart is not configured by this prototype.
+desktop UI. On first launch after installation, it requests sign-in startup by
+default, subject to desktop approval. **Settings → Startup → Start at sign-in**
+can disable or re-enable it. The saved opt-out survives upgrades and later
+launches. Sign-in launches only the background server, without a dashboard or
+terminal window. Disabling startup does not stop the current session. Portal
+denials, unsupported desktops and pending approval are shown in the dashboard.
+The choice and last confirmed result are stored separately in
+`config/mediabridge/autostart.json`, so saving playback preferences does not reset
+them. This is desktop-session startup, not a system boot service; Steam Deck
+Gaming Mode startup is not verified.
 
 Settings, logs, profiles and cookies live under
 `~/.var/app/io.github.murasaki_dev.MediaBridge/`. Tools are read-only under `/app`

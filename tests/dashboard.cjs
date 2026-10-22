@@ -35,6 +35,7 @@ const context = vm.createContext({document:{getElementById:node, createElement:(
     let data = {};
     if (path === '/status') data = state;
     if (path === '/platform') data = {os:'windows'};
+    if (path === '/settings/autostart') data = {supported:true,enabled:false,requested:false,pending:false,error:null};
     if (path === '/preferences' || path === '/settings/preferences') data = {default_quality:'720', default_video_codec:'h264',cookies_browser:'off'};
     if (path === '/settings/remote-origins') data = {remote_origin_servers:[]};
     if (path === '/queue_batch') data = {added:JSON.parse(options.body).items.length};
@@ -42,6 +43,15 @@ const context = vm.createContext({document:{getElementById:node, createElement:(
   }});
 vm.runInContext(html.match(/<script>([\s\S]*?)<\/script>/)[1], context);
 async function run() {
+  vm.runInContext('renderAutostart({supported:true,enabled:true,pending:false})',context);
+  assert.equal(node('autostart-enabled').checked,true);
+  vm.runInContext('renderAutostart({supported:true,enabled:false,requested:true,pending:true})',context);
+  assert.equal(node('autostart-enabled').disabled,true);
+  assert.match(node('autostart-status').textContent,/approval/);
+  node('autostart-enabled').checked=false;
+  await node('autostart-enabled').onchange();
+  assert(posts.some(post=>post.path==='/settings/autostart' && post.body.enabled===false));
+  assert.equal(node('autostart-enabled').checked,false);
   vm.runInContext('renderFlatpakAccess({flatpak:true,steam_host_access_configured:false})',context);
   assert.equal(node('flatpak-host-settings').classList.contains('hidden'),false);
   assert.match(node('flatpak-host-status').textContent,/not configured/);
