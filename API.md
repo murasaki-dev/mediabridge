@@ -26,7 +26,7 @@ Baka-Inu supplies its own share bookmarks, login dialogs, credential storage, ac
 
 ### Client playback requests
 
-SMB URLs stay credential-free in requests, queue state, history, and public status. Set `local:true` and an opaque 24-hex `smb_share_id` to request provider-backed playback. Without a reference, MediaBridge uses direct guest SMB. SMB metadata uses the filename, and explicit playback disables resume/watch-later positions and starts at zero.
+SMB URLs stay credential-free in requests, queue state, history, and public status. Set `local:true` and an opaque 24-hex `smb_share_id` to request provider-backed playback. Without a reference, MediaBridge uses direct guest SMB. SMB metadata uses the filename. Playback disables mpv watch-later positions and starts at zero unless `start_position_seconds` specifies a saved position, including one captured by `/play_interrupt`.
 
 ```sh
 # Direct guest share, using an SMB-enabled mpv build:
@@ -106,7 +106,7 @@ This endpoint belongs to the companion service; it is not a MediaBridge route. T
 
 Private authenticated or relay URLs go only to mpv's stdin playlist, with a forced safe title. They are excluded from argv and raw player logs; only static error categories are reported. Direct SMB needs a compatible mpv build; installing an extra FFmpeg package alone does not guarantee protocol support. Standalone MediaBridge does not include Baka-Inu's SMB browser, bookmark store, credential UI, or relay server.
 
-The stdin input is a one-item `#EXTM3U` playlist; terminal input is disabled. Both private player output streams are drained without printing raw lines. Static diagnostic categories cover unsupported protocols, rejected login, denied access, missing files, rejected mpv options, unrecognized media/playlist input, and connection failures. Renderer/audio fallback messages are excluded from SMB file-error classification. These messages can appear in `playback_error`; a later unsuccessful process exit preserves an existing detailed error. Safe launch logs retain the original SMB URL, provider-reference presence, playback epoch, and zero start position; EOF logs omit the private URL.
+The stdin input is a one-item `#EXTM3U` playlist; terminal input is disabled. Both private player output streams are drained without printing raw lines. Static diagnostic categories cover unsupported protocols, rejected login, denied access, missing files, rejected mpv options, unrecognized media/playlist input, and connection failures. Renderer/audio fallback messages are excluded from SMB file-error classification. These messages can appear in `playback_error`; a later unsuccessful process exit preserves an existing detailed error. Safe launch logs retain the original SMB URL, provider-reference presence, playback epoch, and requested start position; EOF logs omit the private URL.
 
 | Failure | What to check |
 | --- | --- |
@@ -131,7 +131,7 @@ Authenticated SMB playback in this standalone checkout has not been exercised en
 | Autoplay | Immediate live candidate scan, retry cooldown, cancellation generation checks, progress/errors, and `/autoplay/error/clear`. |
 | Cookie usage | Configured browser cookies now also apply to background YouTube metadata, playlist, and Mix lookups. |
 | Decode/logging | Hardware decode selection/reporting, Linux stderr log mirroring, and Linux LibreWolf sign-in launcher/PID/stderr diagnostics. |
-| SMB | Provider-backed private playback, optional HTTP relay, filename metadata, zero start position, and safe error categories. The native login store and relay remain external. |
+| SMB | Provider-backed private playback, optional HTTP relay, filename metadata, explicit start/resume positions, and safe error categories. The native login store and relay remain external. |
 
 No Rust dependencies were added or upgraded for these changes. Submitter IDs remain caller-supplied metadata; room authentication and roles belong to the integrating application. In particular, MediaBridge does not implement Baka-Inu's admin-only error dismissal or SMB browsing permissions.
 
@@ -173,15 +173,17 @@ curl -sS -X POST "$BASE_URL/pause"
 
 ### Queue item fields
 
-`/play`, `/play_preserve_queue`, `/queue`, `/queue_next`, and the playlist endpoints accept a JSON queue item. Only `url` is required. All other fields are optional.
+`/play`, `/play_preserve_queue`, `/play_interrupt`, `/queue`, `/queue_next`, and the playlist endpoints accept a JSON queue item. Only `url` is required. All other fields are optional.
 
 | Field | Type | Purpose |
 | --- | --- | --- |
 | `url` | string | HTTP(S) URL to open or play. Browser playback can open any website; `smb://` URLs are supported only with `local:true`. |
 | `local` | boolean | `true` selects local mpv playback (with yt-dlp for supported sites); otherwise playback uses the browser path. Defaults to `false`. |
 | `quality` | string | For local mpv playback, use `"best"` or a vertical resolution such as `"720"` or `"1080"`. The allowed numeric range is 144–4320. |
+| `start_position_seconds` | number or null | Optional finite, non-negative start position in seconds. Used to restore interrupted videos. Exposed on queued/history items until consumed at launch. Browser restoration requires a controllable, seekable video. |
 | `screen` | integer | Optional zero-based display index, 0–32. Platform and desktop support determine whether placement is honored. |
 | `subtitles` | boolean | Per-item subtitle preference. |
+| `load_multiple_audio_tracks` | boolean | Optional per-video override of `track_preferences.load_multiple_audio_tracks`. False requests only extracted original/default audio; true exposes alternate extracted formats for track selection. Applies to mpv and takes effect at launch. Embedded tracks in one file remain visible either way. |
 | `browser` | string | Optional browser executable/name for browser playback, such as `"librewolf"`. Set it to `"librewolf"` to use the managed profile, which can open any HTTP(S) website on supported builds. |
 | `browser_args` | array of strings | Optional extra browser arguments when selecting a browser. |
 | `youtube_mode` | string | YouTube browser mode; `"regular"` is the default and `"tv"` selects the TV/Leanback view. |
@@ -197,9 +199,9 @@ curl -sS -X POST "$BASE_URL/pause"
 | `channel_avatar_url` | string | Optional channel avatar URL. |
 | `channel_banner_url` | string | Optional channel banner URL. |
 | `autoplay` | boolean | Optional server autoplay switch. Enabling starts a background Mix search immediately; suggestions are appended after explicit queue entries. |
-| `autoplay_minutes` | integer | Optional timeout for `autoplay:true`, from 1 to 1440 minutes. Omit for no timeout. |
+| `autoplay_minutes` | number | Legacy alias for setting the global close countdown in positive minutes, independent of `autoplay`. Decimals are accepted. Prefer `/timer` for new clients. Omission leaves an existing countdown unchanged. |
 
-`POST /autoplay` also turns the server autoplay switch on or off at any time. Send `{"enabled":true,"duration_minutes":30}` to enable it for 30 minutes, or `{"enabled":false}` to disable it. `GET /status` reports `autoplay_enabled` and `autoplay_until_epoch_ms`. Generated Mix entries appear in `queue_items` with `autoplay_generated:true`; new explicit entries are placed before them.
+`POST /autoplay` turns the server autoplay switch on or off. Send `{"enabled":true}` or `{"enabled":false}`. Autoplay has no separate expiry policy. The optional legacy `duration_minutes` field now sets the global close countdown; it does not merely stop Mix generation. Omitted/null `duration_minutes` leaves the countdown unchanged, and disabling autoplay does not cancel it. Use `/timer` to set, replace, or cancel the countdown. `GET /status` reports `autoplay_enabled`. Generated Mix entries appear in `queue_items` with `autoplay_generated:true`; new explicit entries are placed before them.
 
 Enabling immediately tries the current YouTube video and then up to 20 eligible non-generated YouTube queue entries in live order. Non-YouTube entries do not consume those slots. One worker reads up to 40 Mix candidates and appends up to 20 unseen suggestions. Existing suggestions stop further expansion. Unavailable/duplicate-only seeds advance the scan; operational failures retain a diagnostic and retry after a 60-second cooldown. Cancelling invalidates worker generations. Background cancellable commands have a 90-second per-command deadline; ordinary playlist expansion and uncancelled resolver calls retain their existing execution paths. Mix availability is not guaranteed.
 
@@ -214,7 +216,7 @@ Applications can inspect the waiting queue through `GET /status`. Use `queue_ite
 ```sh
 curl -sS -X POST "$BASE_URL/autoplay" \
   -H 'Content-Type: application/json' \
-  -d '{"enabled":true,"duration_minutes":30}'
+  -d '{"enabled":true}'
 
 curl -sS "$BASE_URL/status"
 curl -sS -X POST "$BASE_URL/autoplay/error/clear"
@@ -253,6 +255,26 @@ curl -sS -X POST "$BASE_URL/play" \
 
 `POST /play_preserve_queue` replaces current playback and archives the former item, while preserving all waiting entries. It accepts the same body as `/play`.
 
+### Interrupt playback and resume it next
+
+`POST /play_interrupt` accepts the same queue-item body as `/play`. With a seekable current video, it captures the reported playback position, pauses that video, and inserts a copy at the very front of the waiting queue with `start_position_seconds` set to the captured value. It then replaces current playback with the submitted video. All other queue entries retain their order. When the new video ends, or `/next` is requested, the interrupted video launches from the saved position.
+
+```sh
+curl -sS -X POST "$BASE_URL/play_interrupt" \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com/short-video.mp4","local":true}'
+```
+
+Example: A is playing at 125.75 seconds and B → C are waiting. Interrupting with X makes X current and queues A (resume at 125.75s) → B → C. Interrupting X with Y makes Y current and queues X (its saved position) → A → B → C. The interrupted item retains its original playback settings, attribution, and private SMB reference. A generated suggestion becomes permanent when interrupted so switching autoplay off will not discard the saved item. It is queued rather than archived in history at interruption time.
+
+Success returns `202` and `{"ok":true}`. If idle, this acts like play while preserving any waiting queue. With an active item, `409` is returned before pausing if no finite seekable position is reported, a prior browser restore is still pending, or the pause control fails. This includes unsupported browser controls and unseekable/live content. Invalid negative/non-finite start values return `400` on single-item and batch submission.
+
+The original player is closed after pausing; MediaBridge saves the item and position in memory rather than keeping a second player paused in the background. mpv receives an explicit start position with its automatic watch-later resume disabled, including for SMB. For browser playback, MediaBridge waits up to 60 seconds for the page to expose seeking, retrying at one-second intervals. Failure to restore becomes `playback_error`; browser sites may delay or reject seeking. The timestamp is the player's reported snapshot and is not frame-exact. Restarting MediaBridge loses the in-memory queue and its saved positions.
+
+This operation is not transactional across player processes. If closing the old player cannot be confirmed, it returns `409`; if launching the new player fails, it returns `500`. In either case, an already-captured interrupted item remains at the front of the queue for recovery. A later `202` likewise means the new launch was accepted, not that decoding or a future browser seek has completed. While it remains queued, `/status` exposes the saved position as `queue_items[n].start_position_seconds`; launching consumes that marker, so completed history replays normally begin again rather than inheriting an old interruption point.
+
+### Batch additions and literal tail insertion
+
 `POST /queue_batch` accepts `{"mode":"next","items":[{"url":"smb://host/share/a.mp4","local":true}]}`. Use `next` to insert at the front or `last` to append after the entire queue, including suggestions. Selection order is retained. If idle, the first selected item starts. The limit is 1–200 items and a 1 MiB body. All URLs and display indexes are validated before mutation; a player startup failure can still return `500`. Per-item autoplay switches are ignored. Success returns `202` with `{"ok":true,"added":N}`.
 
 The body-size limit is 1,048,576 bytes; invalid/oversized bodies, unsupported modes, empty/over-200 selections, rejected URLs, and invalid display indexes return `400`. This is whole-selection URL/display validation, not an end-to-end playback transaction: SMB credentials, file availability, and other player-startup conditions may fail when an item is actually launched. A `202` means accepted/started, not verified decoding of every selected file. `added` includes the first item if idle playback starts it.
@@ -284,6 +306,7 @@ With an active current item and a waiting queue `Manual A → Auto X → Auto Y`
 | `/queue_batch` next [B, C] | B → C → Manual A → Auto X → Auto Y |
 | `/queue_batch` last [B, C] | Manual A → Auto X → Auto Y → B → C |
 | `/play_preserve_queue` B | Manual A → Auto X → Auto Y; B becomes current |
+| `/play_interrupt` B | Former current (saved position) → Manual A → Auto X → Auto Y; B becomes current |
 | `/play` B | Empty; B becomes current |
 
 `at_end` is specific to `/queue`. `/queue_next` preserves the remaining queue by default and does not require a `preserve_queue` flag.
@@ -362,7 +385,143 @@ curl -sS -X POST "$BASE_URL/queue/promote" \
   -H 'Content-Type: application/json' -d '{"index":0,"queued_by_user_id":"user-42"}'
 ```
 
-### Playback controls
+### Steam on the host
+
+Steam must already be running as the same logged-in desktop user as MediaBridge. These commands act on the MediaBridge PC, independently of Moonlight or Steam Link.
+
+```sh
+curl -X POST "$BASE_URL/steam/bigpicture"
+curl "$BASE_URL/status"
+curl -X POST "$BASE_URL/steam/close"
+```
+
+`POST /steam/bigpicture` returns `202` for a background launch request. Poll `steam.phase` and `steam.error` for its outcome. MediaBridge refuses to take over an already-open Big Picture window, an already-running detected game, or a desktop where Big Picture windows cannot be inspected. Repeating Open for an active managed session is a no-op. Steam is not started if it is absent.
+
+Every `/status` response contains a separate `steam` object:
+
+```json
+{"active":true,"managed":true,"phase":"game","running":true,"big_picture_open":true,"games":[{"app_id":"1245620","name":"ELDEN RING"}],"error":null}
+```
+
+`active` includes a pending launch; `managed` becomes true only after MediaBridge's preflight and open command succeed. Phases are `idle`, `starting`, `browsing`, `game`, `transitioning`, `unknown`, `closing`, `close_failed`, and `error`. IDs are strings (non-Steam shortcut IDs can exceed JavaScript's integer precision); an unresolved name is `null`. All detected games are listed, rather than assuming only one is running. `running` and `big_picture_open` can be `null` when unobserved. An inactive session is not a global Steam monitor.
+
+When no MediaBridge video or Moonlight session is active, the top-level title is `Steam` or `Steam — Game Name`, with a `steam_<phase>` playback state. During concurrent video playback, normal video metadata remains at the top level and Steam information stays under `steam`.
+
+Manual game closure returns the managed session to `browsing` if Big Picture remains. If both the game and Big Picture disappear, the session ends after a three-second grace period (initial opening allows twelve seconds). Steam exiting ends the session. MediaBridge never automatically reopens Big Picture. If inspection fails, the session reports `unknown` instead of claiming it closed. Ownership is in memory: restarting MediaBridge releases it and does not adopt existing Steam sessions.
+
+`POST /steam/close` returns `202` while a managed session closes, or `200` with `closing:false` if there is no managed session. It does not touch video playback or unmanaged Steam sessions. It requests that detected game processes exit, allows three seconds, then force-terminates surviving identified processes; unsaved game progress can be lost. It exits Big Picture and hides/minimizes Steam windows, leaving Steam running. Process identity is checked before termination. Cleanup failures remain visible as `close_failed`; retry Close after resolving them. The regular `/close` action and countdown expiry close video, Moonlight, and managed Steam together; `/steam/close` remains Steam-only.
+
+Game detection uses Steam's bounded process-log history with process creation-time checks; Linux additionally reads same-user Steam app-ID environment markers. Names come from local library manifests and non-Steam shortcut metadata. These are internal Steam formats, so missing logs, unusual launchers, inaccessible processes, or changed formats can prevent detection. Big Picture is identified by Steam-owned windows with known Big Picture titles, including windows covered by a game; it is not inferred solely from the last command. Localized or changed window titles may require additional recognition rules.
+
+Linux requires Python 3 and X11/XWayland window access through `libX11`. Distrobox invokes the helper through `distrobox-host-exec`, so Python, `xdg-open`, and `libX11` must be available on the desktop host. Native Wayland Steam windows that are not exposed through XWayland are not supported. No Steam credentials or Web API key are needed.
+
+### Close countdown
+
+`POST /timer` schedules the same global close action as `POST /close`, after a caller-selected number of minutes. It works independently of autoplay and can be scheduled while idle, during browser/video playback, Moonlight streaming, or a managed Steam session. There is one countdown per MediaBridge process; setting it replaces the previous deadline rather than adding another timer.
+
+```sh
+# Close all managed playback in 37.5 minutes:
+curl -sS -X POST "$BASE_URL/timer" \
+  -H 'Content-Type: application/json' -d '{"minutes":37.5}'
+
+# Replace it with 90 minutes from now:
+curl -sS -X POST "$BASE_URL/timer" \
+  -H 'Content-Type: application/json' -d '{"minutes":90}'
+
+# Cancel the countdown without stopping anything:
+curl -sS -X POST "$BASE_URL/timer" \
+  -H 'Content-Type: application/json' -d '{"minutes":null}'
+```
+
+`minutes` accepts any positive finite number representable by the host clock, including decimal minutes. There is no preset-only selection or 1440-minute cap. Zero, negatives, nonnumeric values, non-finite values, and unrepresentable deadlines return `400` without changing the active countdown. Explicit `null` or an omitted `minutes` field cancels it. The JSON body limit is 4096 bytes.
+
+Success returns `200` with `{"ok":true,"close_at_epoch_ms":1792700000000}` (illustrative timestamp), or a null deadline when cancelled. Poll `/status` for `close_at_epoch_ms`, `close_remaining_seconds`, and `close_timer_error`. The remaining value is seconds, may be fractional, and is `null` when no countdown is active. Setting or cancelling the countdown clears the previous synchronous timer-cleanup error.
+
+At expiry, MediaBridge consumes the timer once, stops video and controllable browser playback, terminates its Moonlight process group, disables autoplay, cancels background extraction, and clears the waiting queue. It also requests closure of the managed Steam game/Big Picture session even if video was playing simultaneously. History stays in memory. Steam cleanup is asynchronous: inspect `steam.phase`/`steam.error` for completion or later cleanup failure. This uses the existing managed-session rules, including potential loss of unsaved game progress; it does not take over unrelated Steam sessions or arbitrary browser windows outside MediaBridge's controls. The MediaBridge server remains running; this is not OS sleep or host shutdown.
+
+Starting another video, advancing the queue, toggling autoplay, or opening Moonlight/Steam does not reset or cancel the countdown. Manual `/close` clears it. Restarting MediaBridge loses it. Expiry uses a monotonic clock and is checked by the server loop; a blocked player/browser operation or synchronous request can delay cleanup. The dashboard countdown updates through normal status polling. Synchronous close errors appear in `close_timer_error`; every cleanup target is attempted even if another target reports failure. Steam worker errors remain in `steam.error`. A consumed timer is not automatically retried; the user can retry Close or set a new countdown.
+
+Compatibility change: `autoplay_minutes` on single-item/playlist submissions and `duration_minutes` on `/autoplay` now schedule this close action instead of an autoplay-only timeout. `autoplay_minutes` is still ignored for batch items. The old status field `autoplay_until_epoch_ms` remains a deprecated alias of `close_at_epoch_ms`, including when autoplay is off. New clients should use `/timer` and the `close_*` fields.
+
+### Subtitle and audio tracks (mpv)
+
+During local mpv playback, `/status` includes `subtitle_tracks`, `audio_tracks`, `tracks_available`, and `playback_epoch`. Lists come from mpv's live `track-list`, so they refresh as tracks become available and switching Off does not discard them. They are scoped to the current video, not a permanent cross-video archive. Browser playback returns empty lists with `tracks_available:false`; mpv startup/IPC failure can also make the lists temporarily unavailable.
+
+Example status excerpt:
+
+```json
+{
+  "playback_epoch": 42,
+  "tracks_available": true,
+  "subtitle_tracks": [
+    {"id":1,"language":"eng","title":"English","codec":"subrip","selected":true,"default":true,"forced":false,"external":false,"channels":null},
+    {"id":2,"language":"spa","title":"Spanish","codec":"subrip","selected":false,"default":false,"forced":false,"external":true,"channels":null}
+  ],
+  "audio_tracks": [
+    {"id":1,"language":"eng","title":"Original","codec":"aac","selected":true,"default":true,"forced":false,"external":false,"channels":2},
+    {"id":2,"language":"spa","title":"Spanish dub","codec":"aac","selected":false,"default":false,"forced":false,"external":false,"channels":2}
+  ]
+}
+```
+
+IDs are mpv track IDs, not array indexes, and are unique only within their type and current playback. Metadata fields can be null when absent. MediaBridge deliberately excludes source URLs and external filenames from this schema, including private SMB relay/credential URLs. `selected` refers to the primary subtitle selection, not a secondary subtitle overlay.
+
+Use `POST /subtitles/select` or `POST /audio/select` to select an ID from its respective list. `id:null` turns that type off; it preserves the loaded list, and another selection can turn it on again without restarting playback. Disabling subtitles also disables secondary subtitles and subtitle visibility. Negative/non-integer IDs are invalid; unknown IDs return `404`. A missing/not-ready mpv session or a mismatched `playback_epoch` returns `409`. Supply the epoch from the same status response as the list to avoid accidentally selecting a track after the video changes.
+
+```sh
+# Select subtitle ID 2 and remember its language/title for future playback:
+curl -sS -X POST "$BASE_URL/subtitles/select" \
+  -H 'Content-Type: application/json' \
+  -d '{"id":2,"playback_epoch":42,"remember":true}'
+
+# Turn subtitles off for this video only, retaining its list:
+curl -sS -X POST "$BASE_URL/subtitles/select" \
+  -H 'Content-Type: application/json' \
+  -d '{"id":null,"playback_epoch":42,"remember":false}'
+
+# Change audio language/track:
+curl -sS -X POST "$BASE_URL/audio/select" \
+  -H 'Content-Type: application/json' \
+  -d '{"id":1,"playback_epoch":42,"remember":true}'
+```
+
+`remember` defaults to true. A successful switch returns `200` with `{"ok":true,"preference_saved":true,"preference_error":null}`. With `remember:false`, `preference_saved` is false and existing defaults stay unchanged. If the current track switches but saving settings fails, the response remains `200`, with `preference_saved:false` and a readable `preference_error`; clients must display that partial result. Request bodies are capped at 4096 bytes.
+
+Remembered selections use language/title matching, **never a saved numeric track ID**. Exact language/title matches take priority, then language alone; title-only matching is used when no language is known. If no match appears, mpv retains its normal selection. Untagged/untitled tracks cannot identify a specific option in unrelated files. The app also supplies mpv's subtitle/audio language preferences at launch and tries matching newly appearing tracks for up to 60 seconds. Explicit user selection cancels further automatic matching for that type on the current video.
+
+Remembering a subtitle selection enables subtitle loading by default. Remembering subtitle Off sets the saved `subtitles` default to false. An explicit queue item `subtitles:false` always suppresses subtitle loading/selection for that launch, even with a saved language preference. Choosing Off on an already loaded video keeps its list in memory; starting a later video without subtitle loading does not fetch a hidden list for later selection. Embedded subtitles can still be listed, but begin disabled. When loading is enabled, MediaBridge requests all available subtitle languages from yt-dlp and uses the saved preference to select one. Sites can omit languages or reject subtitle access, and this can add extraction work.
+
+Remembering audio Off sets `track_preferences.audio_disabled:true`; selecting an audio track clears it. Audio switching is independent of subtitle loading. A remembered choice applies to future launches and persists in `mediabridge.json` across restarts; already queued items with explicit playback overrides retain those overrides.
+
+### Alternate audio loading and bandwidth
+
+`track_preferences.load_multiple_audio_tracks` defaults to false. A per-item `load_multiple_audio_tracks` overrides it. The dashboard provides both a persistent default and a checkbox for the next submission. Changing the toggle does not reload or prune tracks in an already playing video.
+
+- **Off:** mpv's yt-dlp `all_formats` mode is disabled. For extracted streams, MediaBridge first tries audio formats whose `format_note` identifies them as original, then falls back to the normal audio choice if that metadata is absent. The source may not identify an original track, so this is original/default-only selection, not a guarantee of a particular spoken language.
+- **On:** mpv's `all_formats` and `force_all_formats` modes expose alternate extracted formats as selectable tracks. This can expose alternate video formats too, although this API lists only audio/subtitle tracks. mpv normally opens a format when selected rather than streaming all alternatives simultaneously. Switching can be slow or fail on some sources. Selecting a muxed audio/video format may fetch its accompanying video data; selecting audio is not a promise that the original video quality/bandwidth limit will remain the only stream used.
+- **Embedded multi-track files/SMB:** these options cannot strip unwanted audio bytes out of an interleaved file or make a single-track source multilingual. mpv reports whatever tracks the file/manifest actually exposes. Disabling alternate-format exposure may reduce probing/requests for some web sources, but a bandwidth reduction is not guaranteed.
+
+These mechanisms follow mpv's documented [track properties](https://mpv.io/manual/stable/#property-list), [track/language selection](https://mpv.io/manual/stable/#track-selection), and [yt-dlp hook options](https://mpv.io/manual/stable/#options-ytdl). Track selection and Off behavior were verified locally with two subtitle and two audio tracks in an isolated Windows mpv fixture. Remote YouTube alternate-audio/subtitle availability and cross-video site behavior remain source-dependent and have not been verified end to end here.
+
+### General playback controls
+
+#### Brief mpv on-screen feedback
+
+Local mpv launches use transient OSD messages rather than a persistent playback-status overlay:
+
+| Trigger | Feedback | Duration |
+| --- | --- | --- |
+| New video starts | mpv's media title; private SMB playback uses the forced safe title | 2 seconds |
+| `/pause`, `/resume`, `/play_pause` | `Paused` or `Playing`, based on mpv's resulting state | 1.2 seconds |
+| `/seek`, `/rewind`, `/forward` | mpv's native position/time message and progress bar | 1.2 seconds |
+| Volume controls | Current volume percentage | 1.2 seconds |
+| `/subtitles/select`, `/audio/select` | Type plus language/title, track ID if unnamed, or `Off` | 1.2 seconds |
+
+The messages are driven by the existing playback/track endpoints; no additional request fields or OSD route is needed. Later messages replace earlier ones instead of accumulating. Track metadata is sent as literal text, stripped of control characters, and capped at 180 characters. Track changes made by initial automatic preference matching do not replace the startup title with extra notifications.
+
+MediaBridge sets `osd-level=1`, `osd-duration=1200`, `osd-on-seek=msg-bar`, and a 2000 ms startup title message. It explicitly requests seek OSD because IPC controls do not always show mpv's normal keyboard feedback by default. OSD delivery is best effort: failure to display feedback does not make an otherwise successful control fail. This applies to local mpv only; browser playback retains the site's own player UI. Existing mpv scripts or manual OSD changes may affect appearance.
+
+The native command prefixes and play/pause/seek/track operations were checked against an isolated Windows mpv instance. That fixture uses null audio/video outputs, so it validates command handling rather than the visual appearance of a particular renderer. See the upstream [mpv OSD options](https://mpv.io/manual/stable/#osd) and [command prefixes](https://mpv.io/manual/stable/#input-command-prefixes).
 
 All controls below use `POST`. They control the active mpv item or managed browser playback where supported. If no controllable player is active, the server returns a conflict error.
 
@@ -414,7 +573,7 @@ curl -sS -X POST "$BASE_URL/volume" \
 
 `POST /next` starts the first queued item and adds the current item to history. Returns `409` if the queue is empty.
 
-`POST /close` is an abort action: it stops playback and mirroring, disables autoplay and its timeout, clears the queue, preserves session history, and cancels active background yt-dlp lookups. It returns `409` if playback state was cleared but the managed LibreWolf window could not be confirmed closed.
+`POST /close` closes all managed playback together: video/controllable browser playback, Moonlight, and the managed Steam session. It disables autoplay, cancels the close countdown and active background extraction, clears the queue, and preserves session history. Cleanup attempts continue if another target fails. It returns `200` with `{"ok":true,"closing":false}` when no asynchronous Steam close is pending, `202` with `closing:true` when Steam cleanup is pending, or `409` with the synchronous cleanup errors. Poll Steam status for asynchronous completion/errors. The dashboard button is labeled **Close all playback**.
 
 ```sh
 curl -sS -X POST "$BASE_URL/previous"
@@ -459,6 +618,9 @@ The response exposes the current item separately from the waiting queue. `curren
 | `queue_items` | Array of waiting item objects with URL, metadata, playback options, and `autoplay_generated`. `true` means temporary Mix-generated; `false` means permanent. |
 | `history_items` | Session history, newest first, using the same item schema as `queue_items`. Both include `queued_by_user_id`, `duration_seconds`, and `metadata_error`, without SMB credential references. |
 | `hardware_decoder` | mpv decoder name, `software` when disabled, `checking` when unavailable, or `null` for browser playback. |
+| `playback_epoch` | Playback generation; send it with track-selection requests to reject stale track IDs. |
+| `subtitle_tracks`, `audio_tracks` | Current mpv track lists with IDs, language/title, codec, selection/default/forced/external flags, and channel count where available. |
+| `tracks_available` | Whether mpv's track list could be read; false for browser playback or unavailable IPC. |
 | `autoplay_loading` | Whether a Mix worker is active. |
 | `autoplay_error` | Last operational Mix error, or `null`. |
 | `autoplay_status` | Human-readable Mix scan progress; queue positions refer to the full live queue. |
@@ -475,7 +637,10 @@ The response exposes the current item separately from the waiting queue. `curren
 | `can_seek` | Whether a usable duration is available for seeking. |
 | `previous_available` | Whether a previous item exists in playback history. |
 | `autoplay_enabled` | Whether post-queue autoplay is enabled. |
-| `autoplay_until_epoch_ms` | Optional expiration time as Unix epoch milliseconds. `null` means no timeout. |
+| `close_at_epoch_ms` | Global close-countdown deadline as Unix epoch milliseconds, or `null`. |
+| `close_remaining_seconds` | Remaining countdown seconds (possibly fractional), or `null`. |
+| `close_timer_error` | Synchronous expiry-cleanup failure, or `null`. Asynchronous Steam failures are in `steam.error`. |
+| `autoplay_until_epoch_ms` | Deprecated alias for `close_at_epoch_ms`; no longer an autoplay-only expiry. |
 
 Example:
 
@@ -507,6 +672,10 @@ Example public queue/history item (illustrative; the same nullable metadata fiel
   "channel_avatar_url": null,
   "channel_banner_url": null,
   "local": true,
+  "browser": null,
+  "subtitles": null,
+  "load_multiple_audio_tracks": null,
+  "start_position_seconds": null,
   "quality": null,
   "screen": null,
   "autoplay_generated": false
@@ -552,7 +721,7 @@ curl -sS -X POST "$BASE_URL/resolve_async" \
 
 These routes are intended for local dashboard/configuration use. They accept `Origin`-less HTTP clients, but browsers cannot use them cross-origin.
 
-`GET /preferences` returns saved playback defaults: `default_screen`, `default_quality`, `default_video_codec`, `subtitles`, `preferred_language`, `cookies_browser`, and `cookies_profile`.
+`GET /preferences` returns saved playback defaults: `default_screen`, `default_quality`, `default_video_codec`, `subtitles`, `preferred_language`, `track_preferences`, `cookies_browser`, and `cookies_profile`.
 
 `POST /settings/preferences` saves those defaults. This replaces the preference values rather than patching selected fields, so send the full desired settings object. Omitted fields use the defaults in the table below.
 
@@ -563,6 +732,7 @@ These routes are intended for local dashboard/configuration use. They accept `Or
 | `default_video_codec` | `"h264"`; explicit `null` is invalid |
 | `subtitles` | `false` |
 | `preferred_language` | `null` |
+| `track_preferences` | `{"subtitle":null,"audio":null,"audio_disabled":false,"load_multiple_audio_tracks":false}` |
 | `cookies_browser` | `"auto"`; an existing installed configuration can have a platform-specific browser selection |
 | `cookies_profile` | `null` |
 
@@ -581,7 +751,7 @@ A saved `default_quality:"best"` can apply to the live preferences after saving,
 
 Background cookie inheritance applies only to YouTube URLs and respects `cookies_browser:"off"`. It uses the configured browser/profile, including the managed LibreWolf profile via yt-dlp's Firefox reader. Preference-selection errors are propagated; the worker does not silently choose another identity. Logs report cookie use without cookie contents. This does not cause unrelated external processes or an integration's own metadata resolver to inherit these settings.
 
-`GET /platform` returns the server operating system, for example `{"os":"windows"}` or `{"os":"linux"}`.
+`GET /platform` returns `os`, `flatpak` (boolean), and `steam_host_access_configured` (boolean or null). The last field reads the effective session-bus policy of the running Flatpak sandbox; it is null outside Flatpak or when that policy cannot be read. True means host-execution permission is configured, not that host Python/libX11 or Steam detection works. False means the permission is absent. Permission changes require quitting and reopening the Flatpak; rechecking before restart still reports the old session. The dashboard's Flatpak-only **Settings → Steam host access** section shows the state and setup command. The API does not grant or revoke sandbox permissions.
 
 `GET /settings/port` returns the listening port. `POST /settings/port` saves a new port and asks the server to restart its listener. The response is `202` with `{"port":PORT,"restart":true}`; the active connection may be interrupted as the server restarts. Port must be from 1–65535 and available.
 
@@ -599,6 +769,8 @@ curl -sS -X POST "$BASE_URL/settings/remote-origins" \
   -H 'Content-Type: application/json' \
   -d '{"remote_origin_servers":["https://party.example"]}'
 ```
+
+The `track_preferences` object stores optional `subtitle` and `audio` choices, each shaped as `{"language":"eng","title":"Original"}` (either field may be null), plus `audio_disabled` and `load_multiple_audio_tracks` booleans. Language tags must contain only ASCII letters, digits, and hyphens, up to 64 bytes; remembered titles are capped at 512 bytes without control characters. Full settings updates must include existing `track_preferences` to preserve them, since settings replacement is not a partial patch. The dashboard carries them forward automatically and clears a saved subtitle match when the manually entered preferred subtitle language changes.
 
 ### Check local browser-cookie access
 
@@ -637,6 +809,31 @@ curl -sS -X POST "$BASE_URL/sunshine" \
 ## Dashboard routes
 
 `GET /` and `GET /index.html` serve the built-in MediaBridge dashboard HTML page. Integrations usually use the JSON API routes above instead.
+
+The Now playing card uses an icon toolbar: previous, back five seconds, play/pause, forward five seconds, next, and close all playback. The play/pause button follows the reported player state and uses the existing pause/resume/toggle commands. Icons have accessible names and tooltips, with 44-pixel touch targets (40 pixels on very narrow screens). No endpoint semantics change.
+
+The dashboard uses a compact responsive layout. Playback controls stay prominent; **Playback options** (including attribution/SMB access), **More play actions**, **Add a batch**, **History**, **Steam session**, and **Audio & subtitles** expand to reveal their controls. **Settings** contains grouped Accounts, Network access, Playback defaults (including Browser cookies), and Server port settings. Question-mark help controls expose detailed guidance by tap/click or keyboard activation, with hover/focus styling on desktop. Source URLs remain available through per-item help. Shorter labels do not change the endpoints below: **Queue** inserts before Mix suggestions, and **Queue at end** appends after everything. Every previously available control remains available; no server setting or API option was removed. The playback-mode selector stays visible in Sunshine mode so users can switch back without reloading.
+
+The dashboard exposes the API improvements as follows:
+
+| Control/display | API behavior |
+| --- | --- |
+| Play now | `/play`, or `/play_playlist` for a playlist; replaces the queue. |
+| Play now · keep queue | `/play_preserve_queue` for one video. |
+| Play now · resume current next | `/play_interrupt` for one video; disabled when a current item reports no seeking. Server checks still apply. |
+| Play next / Play last | Existing queue/playlist routes. Ordinary Play last inserts before Mix suggestions. |
+| Append after everything | `/queue` with `at_end:true` for one video. |
+| Add a batch | One URL per line, 1–200 items, `/queue_batch` with next/last. Uses the form's playback settings. Each URL is an individual item; playlists are not expanded. |
+| Session history | `history_items`, newest first. Replay now keeps the queue; next/last enqueue a copy. Selected history entries are submitted in displayed order through `/queue_batch`. Selection clears if history URL ordering changes. |
+| Submitter ID | Optional caller-supplied `queued_by_user_id` on new submissions, history replays, and Mix promotion. No login or name lookup is added. |
+| Queue/history metadata | Duration (or explicitly unknown), submitter ID, lookup errors, and saved resume position are shown. History responses now also include `browser` and `subtitles` so replay can retain those settings. |
+| Decoder and Mix status | `hardware_decoder`, `autoplay_status`, `autoplay_loading`, and `autoplay_error`. Dismiss Mix error calls `/autoplay/error/clear` without resetting cooldown. |
+| Subtitle/audio selectors | Live mpv track lists, Off controls, and a checked-by-default remember switch. `/subtitles/select` and `/audio/select` carry the playback epoch. |
+| Alternate audio toggle | Per-video and persistent `load_multiple_audio_tracks` controls; off requests original/default extracted audio only. |
+| Close countdown | Custom numeric minutes, remaining time, and start/replace/cancel controls using `/timer`. Works independently of the autoplay toggle. Expiry and Close all playback use the same global cleanup. |
+| SMB provider reference | Optional manually entered 24-hex `smb_share_id` applied only to SMB URLs. This is a provider reference, not a password prompt or share browser. |
+
+Public history omits private SMB references. To replay provider-backed SMB, enter the matching reference in the form first; a multi-selection must use files authorized by that reference. Leaving it blank requests direct guest SMB. The dashboard does not persist the provider reference or submitter field in browser storage. History selection is also held only in memory. No share-browsing, credential-saving service, or user authentication is added by these controls.
 
 ## Errors and status codes
 

@@ -6,10 +6,14 @@ Control media on a Windows or Linux PC from another device on your LAN. MediaBri
 
 - Play web links in a managed LibreWolf browser or directly with mpv and yt-dlp.
 - Queue videos and YouTube playlists, reorder entries, replay history, and add batches without losing queued suggestions.
+- Interrupt with a new video, then resume the previous one next from its saved timestamp.
+- Set a custom close countdown to stop media, browser playback, Moonlight, and managed Steam together, independently of autoplay.
 - Continue with YouTube Mix suggestions, with visible lookup progress and errors.
 - Control playback, seeking, volume, browser zoom, and the host pointer.
+- Switch mpv subtitle/audio tracks, remember language choices, or disable them; alternate audio loading is optional.
 - Reuse local browser sign-ins for playback and background YouTube lookups.
 - Pair Moonlight with a Sunshine host and launch desktop/game streaming.
+- Open a managed Steam Big Picture session on the host, report running games, and close it while leaving Steam running. Video playback can run alongside Steam; manually opened Steam sessions stay unmanaged.
 
 Local playback starts with **720p and H.264 preferences**, with codec fallbacks and configurable hardware decoding. SMB guest playback requires an SMB-enabled mpv build; authenticated SMB or relay playback requires an external provider. Standalone MediaBridge does not include an SMB login store or file browser. See the [SMB API guide](API.md#smb-credential-providers).
 
@@ -34,6 +38,10 @@ chmod +x build-linux.sh install-linux.sh
 ```
 
 The builder requires Rust/Cargo and Linux development libraries. Install with `--no-autostart` to disable login startup, or use `--deps-only` for runtime packages only. Remove the app with `mediabridge-uninstall`; add `--purge-data` to remove settings, logs, and browser data too.
+
+For an experimental, isolated Linux package built from a checkout, see the
+[local Fedora Flatpak build](packaging/flatpak/README.md). Run
+`bash build-flatpak.sh --install` after installing its listed prerequisites.
 
 ### Windows
 

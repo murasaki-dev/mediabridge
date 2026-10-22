@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=MediaBridge
+Comment=Control media playback from your LAN
+Exec=mediabridge-flatpak
+Icon=io.github.murasaki_dev.MediaBridge
+Terminal=false
+Categories=AudioVideo;Network;
+DBusActivatable=true

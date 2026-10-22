@@ -2,6 +2,11 @@
 
 For a quick start, see the [README](../README.md). For HTTP requests and preference fields, see [API.md](../API.md).
 
+For an experimental isolated app/private-runtime package, use
+`bash build-flatpak.sh --install` on Fedora x86_64. The
+[Flatpak build guide](../packaging/flatpak/README.md) covers prerequisites, local
+installation, isolation boundaries and current testing limitations.
+
 ## Linux installation
 
 Run `install-linux.sh` as the desktop user; it uses `sudo` for system dependencies. Release installation needs a published `mediabridge-linux-x86_64.tar.gz` asset. `./install-linux.sh --local` uses `dist/mediabridge-linux-x86_64.tar.gz`; an explicit archive path is also accepted. Build that archive on Linux with `./build-linux.sh` and an installed Rust/Cargo toolchain.
@@ -67,6 +72,7 @@ For native SMB providers on Windows, configure the environment of the process la
 - Use **Connect your accounts** in the dashboard to open sign-in in managed LibreWolf. Sign-in restarts the managed browser without BiDi; close LibreWolf afterward, reopen the dashboard, and use **Check**. Cookie contents stay local. YouTube checks validate extractor access; Twitch checks detect cookie access/presence rather than fully validating the remote session.
 - Linux LibreWolf startup diagnostics include its launcher and PID, and preserve launcher stderr for debugging. A browser or notification service must run in the desktop session; desktop notifications are best effort.
 - Moonlight is bundled; Sunshine is installed separately on the streaming PC. Pair from the dashboard and enter Moonlight's PIN in Sunshine. `MEDIABRIDGE_MOONLIGHT` or `--moonlight PATH` can select another client.
+- Steam host sessions require Steam already running in the same user's desktop session. Windows uses native process/window APIs. Linux uses Python 3, libX11, and xdg-open; under Distrobox these must exist on the host, with `distrobox-host-exec` available inside the container. X11/XWayland Steam windows are supported; native Wayland windows are not. See [Steam session API behavior and limitations](../API.md#steam-on-the-host).
 - X11 pointer control uses xdotool; Wayland uses ydotool. If the installer configures the `mediabridge-input` group, log out and back in to activate membership. Playback does not require rerunning the installer for that change.
 - Default dashboard: `http://127.0.0.1:8765/`. From another device, use the PC's LAN address. Check reachability with `curl http://127.0.0.1:8765/status` before diagnosing LAN/firewall issues.
 - The installer opens TCP 8765 in recognized active Linux firewalls. Changing the app port does not update that rule; adjust it manually. Neither platform's installer enables unknown or inactive firewall managers.

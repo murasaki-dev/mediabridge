@@ -1,7 +1,41 @@
+# Compilation and release output
 /target/
 /dist/
+/.flatpak-builder/
+/build-flatpak/
+*.flatpak
+*.o
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.py[cod]
+__pycache__/
+.pytest_cache/
+
+# Local build scripts and installer definitions (kept outside Git by request)
+/build-flatpak.sh
+/build-linux.sh
+/build-installer.bat
+/build-installer.ps1
+/install-deps.bat
+/MediaBridge.iss
+/packaging/flatpak/build-runtime.sh
+/packaging/flatpak/fetch-tools.py
+
+# Machine-specific settings, logs and credentials
 /mediabridge.json
 /mediabridge.log
 /mediabridge-*.log
 *.cookies.txt
 cookies.txt
+.env
+.env.local
+
+# Editor and operating-system temporary files
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini

@@ -18,7 +18,7 @@ tungstenite = "0.24"
 [target.'cfg(windows)'.dependencies]
 tray-icon = "0.26"
 winit = "0.30"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Time", "Win32_System_RemoteDesktop", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"

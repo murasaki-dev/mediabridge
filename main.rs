@@ -27,6 +27,8 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{connect, Message, WebSocket};
 
+mod steam;
+
 #[cfg(unix)]
 unsafe extern "C" { fn kill(pid: i32, signal: i32) -> i32; }
 
@@ -124,6 +126,7 @@ struct Config {
     default_video_codec: String,
     subtitles: bool,
     preferred_language: Option<String>,
+    track_preferences: TrackPreferences,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -136,6 +139,7 @@ struct UserConfig {
     default_video_codec: String,
     subtitles: bool,
     preferred_language: Option<String>,
+    track_preferences: TrackPreferences,
     cookies_browser: String,
     cookies_profile: Option<String>,
 }
@@ -150,10 +154,24 @@ impl Default for UserConfig {
             default_video_codec: "h264".into(),
             subtitles: false,
             preferred_language: None,
+            track_preferences: TrackPreferences::default(),
             cookies_browser: if cfg!(target_os = "linux") || cfg!(windows) { "librewolf" } else { "auto" }.into(),
             cookies_profile: None,
         }
     }
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct TrackMatch { language: Option<String>, title: Option<String> }
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct TrackPreferences {
+    subtitle: Option<TrackMatch>,
+    audio: Option<TrackMatch>,
+    audio_disabled: bool,
+    load_multiple_audio_tracks: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -164,6 +182,8 @@ struct PlaybackPreferences {
     default_video_codec: String,
     subtitles: bool,
     preferred_language: Option<String>,
+    #[serde(default)]
+    track_preferences: TrackPreferences,
     cookies_browser: String,
     cookies_profile: Option<String>,
 }
@@ -277,6 +297,7 @@ fn save_remote_origins(origins: Vec<String>) -> Result<Vec<String>, String> {
 }
 
 fn validate_preferences(preferences: &PlaybackPreferences) -> Result<(), String> {
+    validate_track_preferences(&preferences.track_preferences)?;
     if preferences.default_screen.is_some_and(|screen| screen > 32) {
         return Err("preferred monitor must be between 0 and 32".into());
     }
@@ -299,6 +320,60 @@ fn validate_preferences(preferences: &PlaybackPreferences) -> Result<(), String>
 }
 
 fn default_cookie_browser() -> String { "auto".into() }
+
+fn validate_track_preferences(preferences: &TrackPreferences) -> Result<(), String> {
+    for choice in [&preferences.subtitle, &preferences.audio].into_iter().flatten() {
+        if choice.language.as_deref().is_some_and(|language| language.is_empty() || language.len() > 64
+            || !language.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')) {
+            return Err("track language must be a language tag containing letters, digits, and hyphens".into());
+        }
+        if choice.title.as_deref().is_some_and(|title| title.len() > 512 || title.chars().any(char::is_control)) {
+            return Err("track title must be at most 512 bytes without control characters".into());
+        }
+    }
+    Ok(())
+}
+
+fn media_tracks(value: &serde_json::Value, kind: &str) -> Vec<MediaTrack> {
+    value.as_array().into_iter().flatten().filter(|track| track.get("type").and_then(|v| v.as_str()) == Some(kind))
+        .filter_map(|track| {
+            let text = |key| track.get(key).and_then(|v| v.as_str()).map(str::to_string);
+            let flag = |key| track.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
+            Some(MediaTrack { id:track.get("id")?.as_i64()?, language:text("lang"), title:text("title"), codec:text("codec"),
+                selected:flag("selected") && track.get("main-selection").and_then(|v| v.as_i64()) != Some(1),
+                default:flag("default"), forced:flag("forced"), external:flag("external"), channels:track.get("demux-channel-count").and_then(|v| v.as_u64()) })
+        }).collect()
+}
+
+fn matching_track<'a>(tracks: &'a [MediaTrack], preference: &TrackMatch) -> Option<&'a MediaTrack> {
+    let eq = |a: Option<&str>, b: Option<&str>| a.zip(b).is_some_and(|(a,b)| a.eq_ignore_ascii_case(b));
+    tracks.iter().filter_map(|track| {
+        let language = eq(track.language.as_deref(), preference.language.as_deref());
+        let title = eq(track.title.as_deref(), preference.title.as_deref());
+        let score = if language && title { 3 } else if language { 2 } else if preference.language.is_none() && title { 1 } else { 0 };
+        (score > 0).then_some((track, score))
+    }).max_by_key(|(_,score)| *score).map(|(track,_)| track)
+}
+
+fn apply_pending_track_preferences(state: &mut State) {
+    let Some((mut preferences, deadline, retry)) = state.pending_track_preferences.take() else { return; };
+    let now = std::time::Instant::now();
+    if now >= deadline { return; }
+    if now < retry { state.pending_track_preferences = Some((preferences, deadline, retry)); return; }
+    if let Some(socket) = state.mpv_socket.as_deref() {
+        if let Some(tracks) = mpv_property(socket, "track-list") {
+            for (kind, property, preference) in [("sub", "sid", &mut preferences.subtitle), ("audio", "aid", &mut preferences.audio)] {
+                let available = media_tracks(&tracks, kind);
+                if let Some(track) = preference.as_ref().and_then(|choice| matching_track(&available, choice)) {
+                    if mpv_ipc(socket, serde_json::json!(["set_property", property, track.id])).is_ok() { *preference = None; }
+                }
+            }
+        }
+    }
+    if preferences.subtitle.is_some() || preferences.audio.is_some() {
+        state.pending_track_preferences = Some((preferences, deadline, now + Duration::from_secs(1)));
+    }
+}
 fn default_video_codec() -> String { "h264".into() }
 
 fn ytdl_format_selector(codec: &str, quality: Option<&str>) -> Result<String, String> {
@@ -320,6 +395,14 @@ fn ytdl_format_selector(codec: &str, quality: Option<&str>) -> Result<String, St
     Ok(bounded(base))
 }
 
+fn audio_format_selector(selector: &str, multiple: bool) -> String {
+    if multiple { return selector.to_string(); }
+    selector.split('/').flat_map(|part| {
+        if part.contains("+ba") { vec![part.replace("+ba", "+ba[format_note*=original]"), part.to_string()] }
+        else { vec![part.to_string()] }
+    }).collect::<Vec<_>>().join("/")
+}
+
 fn save_playback_preferences(preferences: PlaybackPreferences) -> Result<(), String> {
     validate_preferences(&preferences)?;
     let path = user_config_path()?;
@@ -329,6 +412,7 @@ fn save_playback_preferences(preferences: PlaybackPreferences) -> Result<(), Str
     config.default_video_codec = preferences.default_video_codec.clone();
     config.subtitles = preferences.subtitles;
     config.preferred_language = preferences.preferred_language.clone();
+    config.track_preferences = preferences.track_preferences.clone();
     config.cookies_browser = preferences.cookies_browser.clone();
     config.cookies_profile = preferences.cookies_profile.clone();
     let contents = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
@@ -368,6 +452,7 @@ fn current_playback_preferences(cfg: &Config) -> PlaybackPreferences {
             default_video_codec: cfg.default_video_codec.clone(),
             subtitles: cfg.subtitles,
             preferred_language: cfg.preferred_language.clone(),
+            track_preferences: cfg.track_preferences.clone(),
             cookies_browser,
             cookies_profile,
         })
@@ -376,6 +461,10 @@ fn current_playback_preferences(cfg: &Config) -> PlaybackPreferences {
 #[derive(Clone, Deserialize)]
 struct QueueItem {
     url: String,
+    #[serde(default)]
+    load_multiple_audio_tracks: Option<bool>,
+    #[serde(default)]
+    start_position_seconds: Option<f64>,
     #[serde(default)]
     smb_share_id: Option<String>,
     #[serde(default)]
@@ -415,7 +504,7 @@ struct QueueItem {
     #[serde(default)]
     autoplay: Option<bool>,
     #[serde(default)]
-    autoplay_minutes: Option<u64>,
+    autoplay_minutes: Option<f64>,
     #[serde(skip)]
     autoplay_generated: bool,
 }
@@ -428,6 +517,10 @@ struct QueueBatchRequest {
 
 #[derive(Default)]
 struct State {
+    pending_track_preferences: Option<(TrackPreferences, std::time::Instant, std::time::Instant)>,
+    close_timer_error: Option<String>,
+    pending_browser_resume: Option<(f64, std::time::Instant, std::time::Instant)>,
+    steam: Option<steam::Session>,
     player: Option<Child>,
     mpv_socket: Option<PathBuf>,
     current: Option<QueueItem>,
@@ -447,7 +540,7 @@ struct State {
     metadata_in_flight: bool,
     playback_epoch: u64,
     autoplay_enabled: bool,
-    autoplay_until: Option<std::time::Instant>,
+    close_deadline: Option<std::time::Instant>,
     autoplay_tx: Option<Sender<(u64, String, Result<Vec<String>, String>)>>,
     autoplay_rx: Option<Receiver<(u64, String, Result<Vec<String>, String>)>>,
     autoplay_generation: u64,
@@ -510,6 +603,31 @@ struct MirrorRequest {
 struct SeekRequest { position: f64 }
 
 #[derive(Deserialize)]
+struct TrackSelectionRequest {
+    id: Option<i64>,
+    #[serde(default = "default_remember_track")]
+    remember: bool,
+    playback_epoch: Option<u64>,
+}
+fn default_remember_track() -> bool { true }
+
+#[derive(Clone, Serialize)]
+struct MediaTrack {
+    id: i64,
+    language: Option<String>,
+    title: Option<String>,
+    codec: Option<String>,
+    selected: bool,
+    default: bool,
+    forced: bool,
+    external: bool,
+    channels: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct CloseTimerRequest { minutes: Option<f64> }
+
+#[derive(Deserialize)]
 struct LinkRequest { url: String }
 
 #[derive(Deserialize)]
@@ -518,7 +636,7 @@ struct QueueIndexRequest { index: usize, #[serde(default)] to: Option<usize>, #[
 #[derive(Deserialize)]
 struct AutoplayRequest {
     enabled: bool,
-    #[serde(default)] duration_minutes: Option<u64>,
+    #[serde(default)] duration_minutes: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -551,6 +669,8 @@ struct PlaybackPreferencesRequest {
     subtitles: bool,
     #[serde(default)]
     preferred_language: Option<String>,
+    #[serde(default)]
+    track_preferences: TrackPreferences,
     #[serde(default = "default_cookie_browser")]
     cookies_browser: String,
     #[serde(default)]
@@ -565,6 +685,7 @@ impl From<PlaybackPreferencesRequest> for PlaybackPreferences {
         Self { default_screen: value.default_screen, default_quality: value.default_quality.or_else(|| Some("720".into())),
             default_video_codec: value.default_video_codec,
             subtitles: value.subtitles, preferred_language: value.preferred_language,
+            track_preferences: value.track_preferences,
             cookies_browser: value.cookies_browser, cookies_profile: value.cookies_profile }
     }
 }
@@ -595,6 +716,14 @@ fn default_app() -> String { "Desktop".into() }
 
 #[derive(Serialize)]
 struct Status {
+    playback_epoch: u64,
+    subtitle_tracks: Vec<MediaTrack>,
+    audio_tracks: Vec<MediaTrack>,
+    tracks_available: bool,
+    close_at_epoch_ms: Option<u64>,
+    close_remaining_seconds: Option<f64>,
+    close_timer_error: Option<String>,
+    steam: steam::Status,
     autoplay_status: String,
     autoplay_loading: bool,
     autoplay_error: Option<String>,
@@ -626,6 +755,8 @@ struct Status {
 #[derive(Serialize)]
 struct QueueItemStatus {
     url: String,
+    load_multiple_audio_tracks: Option<bool>,
+    start_position_seconds: Option<f64>,
     queued_by_user_id: Option<String>,
     duration_seconds: Option<f64>,
     title: Option<String>,
@@ -635,6 +766,8 @@ struct QueueItemStatus {
     channel_avatar_url: Option<String>,
     channel_banner_url: Option<String>,
     local: bool,
+    browser: Option<String>,
+    subtitles: Option<bool>,
     quality: Option<String>,
     screen: Option<u8>,
     autoplay_generated: bool,
@@ -728,6 +861,7 @@ fn moonlight_pair_status(state: &mut State) -> serde_json::Value {
 
 fn config() -> Result<Config, String> {
     let user = load_user_config()?;
+    validate_track_preferences(&user.track_preferences)?;
     let mut bind = user.bind.clone();
     let remote_origin_servers = normalize_remote_origins(user.remote_origin_servers.clone())?;
     if user.default_screen.is_some_and(|screen| screen > 32) {
@@ -766,6 +900,7 @@ fn config() -> Result<Config, String> {
         default_video_codec: user.default_video_codec,
         subtitles: user.subtitles,
         preferred_language: user.preferred_language,
+        track_preferences: user.track_preferences,
     };
     let mut bind_overridden = false;
     let mut a = env::args().skip(1);
@@ -1594,6 +1729,7 @@ fn drain_autoplay_results(state: &mut State) {
                     let mut item = template.clone();
                     item.url = url;
                     item.queued_by_user_id = None;
+                    item.start_position_seconds = None;
                     item.smb_share_id = None;
                     item.metadata_error = None;
                     item.title = None; item.uploader = None; item.thumbnail_url = None; item.duration_seconds = None;
@@ -1674,12 +1810,12 @@ fn enqueue_explicit_item(state: &mut State, item: QueueItem) {
     state.queue.insert(index, item);
 }
 
-fn set_autoplay(state: &mut State, enabled: bool, duration_minutes: Option<u64>) {
+fn set_autoplay(state: &mut State, enabled: bool, duration_minutes: Option<f64>) {
     state.autoplay_enabled = enabled;
     state.autoplay_retry_at = None;
     state.autoplay_checked_ids.clear();
     state.autoplay_scan_root = state.current.as_ref().map(|item| item.url.clone());
-    state.autoplay_until = if enabled { duration_minutes.map(|minutes| std::time::Instant::now() + Duration::from_secs(minutes * 60)) } else { None };
+    if let Some(minutes) = duration_minutes { let _ = set_close_timer(state, Some(minutes)); }
     if !enabled {
         state.autoplay_generation = state.autoplay_generation.wrapping_add(1);
         if let Some(cancel) = state.autoplay_cancel.take() { cancel.store(true, Ordering::Release); }
@@ -2776,7 +2912,48 @@ fn notify_desktop(title: &str, body: &str) {
     thread::spawn(move || { let _ = child.wait(); });
 }
 
+fn mpv_start_options(url: &str, position: Option<f64>) -> Vec<String> {
+    let smb = url.get(..6).is_some_and(|scheme| scheme.eq_ignore_ascii_case("smb://"));
+    let mut args = Vec::new();
+    if smb { args.extend(["--ytdl=no", "--save-position-on-quit=no"].map(String::from)); }
+    if smb || position.is_some() { args.extend(["--resume-playback=no".into(), format!("--start={}", position.unwrap_or(0.0))]); }
+    args
+}
+
+const MPV_OSD_DURATION_MS: i64 = 1200;
+
+fn mpv_osd_options() -> Vec<String> {
+    vec!["--osd-level=1".into(), format!("--osd-duration={MPV_OSD_DURATION_MS}"),
+        "--osd-on-seek=msg-bar".into(), "--osd-playing-msg=${media-title}".into(),
+        "--osd-playing-msg-duration=2000".into()]
+}
+
+fn brief_osd_text(text: &str) -> String {
+    text.chars().filter(|character| !character.is_control()).take(180).collect()
+}
+
+fn show_mpv_feedback(path: &Path, text: &str) {
+    // Treat metadata as literal text, never as a property expansion or command.
+    let _ = mpv_ipc(path, serde_json::json!(["raw", "show-text", brief_osd_text(text), MPV_OSD_DURATION_MS]));
+}
+
+fn track_feedback(subtitles: bool, track: Option<&MediaTrack>) -> String {
+    let kind = if subtitles { "Subtitles" } else { "Audio" };
+    match track {
+        None => format!("{kind}: Off"),
+        Some(track) => {
+            let label = [track.language.as_deref(), track.title.as_deref()].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+            if label.is_empty() { format!("{kind}: Track {}", track.id) } else { format!("{kind}: {label}") }
+        }
+    }
+}
+
 fn start_url(state: &mut State, cfg: &Config, mut item: QueueItem) -> Result<(), String> {
+    state.playback_epoch = state.playback_epoch.wrapping_add(1);
+    state.pending_track_preferences = None;
+    let resume_position = item.start_position_seconds.unwrap_or(0.0);
+    if !resume_position.is_finite() || resume_position < 0.0 { return Err("start_position_seconds must be finite and non-negative".into()); }
+    state.pending_browser_resume = None;
     state.autoplay_waiting_to_advance = false;
     let preferences = current_playback_preferences(cfg);
     if !item.local_playback { set_youtube_interface(&mut item)?; }
@@ -2803,12 +2980,24 @@ fn start_url(state: &mut State, cfg: &Config, mut item: QueueItem) -> Result<(),
                 // Auto uses an available, supported hardware decoder and falls
                 // back to software decoding when the container has no GPU.
                 format!("--hwdec={}", env::var("MEDIABRIDGE_MPV_HWDEC").unwrap_or_else(|_| "auto".to_string())),
-                "--script-opts=ytdl_hook-ytdl_path=yt-dlp".to_string(),
+                format!("--script-opts=ytdl_hook-ytdl_path=yt-dlp,ytdl_hook-all_formats={},ytdl_hook-force_all_formats=yes",
+                    if item.load_multiple_audio_tracks.unwrap_or(preferences.track_preferences.load_multiple_audio_tracks) { "yes" } else { "no" }),
             ];
-            if item.url.get(..6).is_some_and(|scheme| scheme.eq_ignore_ascii_case("smb://")) {
-                args.extend(["--ytdl=no", "--resume-playback=no", "--start=0", "--save-position-on-quit=no"].map(String::from));
-                println!("Starting SMB playback from 0: {} (account={}, attempt={})", safe_media_url(&item.url), item.smb_share_id.is_some(), state.playback_epoch);
+            let subtitles = item.subtitles.unwrap_or(preferences.subtitles);
+            args.extend(mpv_osd_options());
+            args.push(format!("--sid={}", if subtitles { "auto" } else { "no" }));
+            args.push("--secondary-sid=no".into());
+            args.push(format!("--sub-visibility={}", if subtitles { "yes" } else { "no" }));
+            if let Some(language) = preferences.track_preferences.subtitle.as_ref().and_then(|choice| choice.language.as_deref())
+                .or(preferences.preferred_language.as_deref()) { args.push(format!("--slang={language}")); }
+            if preferences.track_preferences.audio_disabled { args.push("--aid=no".into()); }
+            else if let Some(language) = preferences.track_preferences.audio.as_ref().and_then(|choice| choice.language.as_deref()) {
+                args.push(format!("--alang={language}"));
             }
+            if item.url.get(..6).is_some_and(|scheme| scheme.eq_ignore_ascii_case("smb://")) {
+                println!("Starting SMB playback from {resume_position}: {} (account={}, attempt={})", safe_media_url(&item.url), item.smb_share_id.is_some(), state.playback_epoch);
+            }
+            args.extend(mpv_start_options(&item.url, item.start_position_seconds));
             let cookie_browser = match cookie_browser_spec(&preferences.cookies_browser, preferences.cookies_profile.as_deref()) {
                 Ok(browser) => browser,
                 Err(error) => { eprintln!("could not select the default cookie browser; continuing without browser cookies: {error}"); None }
@@ -2821,16 +3010,12 @@ fn start_url(state: &mut State, cfg: &Config, mut item: QueueItem) -> Result<(),
                 let mut raw_options = format!("remote-components=ejs:github,cookies-from-browser={browser}");
                 let subtitles = item.subtitles.unwrap_or(preferences.subtitles);
                 if !subtitles { raw_options.push_str(",sub-langs=none"); }
-                else if let Some(language) = preferences.preferred_language.as_deref().filter(|v| !v.trim().is_empty()) {
-                    raw_options.push_str(&format!(",sub-langs={}", language.trim()));
-                }
+                else { raw_options.push_str(",sub-langs=all"); }
                 args.push(format!("--ytdl-raw-options={raw_options}"));
             } else {
                 let subtitles = item.subtitles.unwrap_or(preferences.subtitles);
                 let raw_options = if subtitles {
-                    if let Some(language) = preferences.preferred_language.as_deref().filter(|v| !v.trim().is_empty()) {
-                        format!("remote-components=ejs:github,sub-langs={}", language.trim())
-                    } else { "remote-components=ejs:github".to_string() }
+                    "remote-components=ejs:github,sub-langs=all".to_string()
                 } else {
                     "remote-components=ejs:github,sub-langs=none".to_string()
                 };
@@ -2838,7 +3023,8 @@ fn start_url(state: &mut State, cfg: &Config, mut item: QueueItem) -> Result<(),
             }
             let quality = item.quality.as_deref().or(preferences.default_quality.as_deref());
             let format_selector = ytdl_format_selector(&preferences.default_video_codec, quality)?;
-            args.push(format!("--ytdl-format={format_selector}"));
+            let multiple = item.load_multiple_audio_tracks.unwrap_or(preferences.track_preferences.load_multiple_audio_tracks);
+            args.push(format!("--ytdl-format={}", audio_format_selector(&format_selector, multiple)));
             if let Some(screen) = item.screen.or(preferences.default_screen) {
                 args.push(format!("--fs-screen={screen}"));
             }
@@ -2977,6 +3163,18 @@ fn start_url(state: &mut State, cfg: &Config, mut item: QueueItem) -> Result<(),
     let player_child = child.take();
     state.player = player_child;
     state.mpv_socket = mpv_socket;
+    if item.local_playback {
+        let mut tracks = preferences.track_preferences.clone();
+        if !item.subtitles.unwrap_or(preferences.subtitles) { tracks.subtitle = None; }
+        if tracks.audio_disabled { tracks.audio = None; }
+        let now = std::time::Instant::now();
+        state.pending_track_preferences = Some((tracks, now + Duration::from_secs(60), now));
+    }
+    if !item.local_playback && resume_position > 0.0 {
+        let now = std::time::Instant::now();
+        state.pending_browser_resume = Some((resume_position, now + Duration::from_secs(60), now));
+    }
+    item.start_position_seconds = None;
     state.current = Some(item);
     if let Some(current) = state.current.as_ref() {
         if current.title.is_none() && !state.pending_metadata.iter().any(|url| same_media_url(url, &current.url)) {
@@ -3011,13 +3209,24 @@ fn start_url(state: &mut State, cfg: &Config, mut item: QueueItem) -> Result<(),
 }
 
 fn advance(state: &mut State, cfg: &Config) {
+    if expire_close_timer(state, std::time::Instant::now()) { return; }
+    apply_pending_track_preferences(state);
+    if let Some((position, deadline, retry)) = state.pending_browser_resume {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            state.pending_browser_resume = None;
+            state.playback_error = Some("Browser did not become seekable in time to restore the saved position".into());
+        } else if now >= retry {
+            state.pending_browser_resume = Some((position, deadline, now + Duration::from_secs(1)));
+            if media_status(state).can_seek && control_media(state, "seek", Some(position)).is_ok() {
+                state.pending_browser_resume = None;
+            }
+        }
+    }
     drain_player_errors(state);
     drain_metadata(state);
     #[cfg(any(windows, target_os = "linux"))]
     {
-        if state.autoplay_until.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
-            set_autoplay(state, false, None);
-        }
         let ended = refresh_librewolf_video(state).is_some_and(|video| video.ended);
         if let (Some(item), Some(bidi)) = (state.current.as_ref(), state.librewolf_bidi.as_mut()) {
             let _ = bidi.set_youtube_autoplay(&item.url, false);
@@ -3110,7 +3319,18 @@ fn push_history(state: &mut State, item: QueueItem) {
     while state.history.len() > 50 { state.history.pop_front(); }
 }
 
+fn interrupted_item(current: &QueueItem, status: &Status) -> Result<QueueItem, String> {
+    let position = status.position_seconds.filter(|position| position.is_finite() && *position >= 0.0)
+        .filter(|_| status.can_seek).ok_or("current video must report a seekable position before it can be interrupted")?;
+    let mut interrupted = current.clone();
+    interrupted.start_position_seconds = Some(position);
+    interrupted.autoplay_generated = false;
+    Ok(interrupted)
+}
+
 fn stop_current(state: &mut State) -> Result<(), String> {
+    state.pending_track_preferences = None;
+    state.pending_browser_resume = None;
     let mut close_error = None;
     let mut librewolf_closed = false;
     #[cfg(any(windows, target_os = "linux"))]
@@ -3323,10 +3543,13 @@ fn status_items<'a>(items: impl Iterator<Item = &'a QueueItem>) -> Vec<QueueItem
     items.map(|item| QueueItemStatus {
         queued_by_user_id: item.queued_by_user_id.clone(),
         duration_seconds: item.duration_seconds,
+        load_multiple_audio_tracks: item.load_multiple_audio_tracks,
+        start_position_seconds: item.start_position_seconds,
         url: safe_media_url(&item.url), title: item.title.clone(), metadata_error: item.metadata_error.clone(), uploader: item.uploader.clone(),
         thumbnail_url: item.thumbnail_url.clone(), channel_avatar_url: item.channel_avatar_url.clone(),
         channel_banner_url: item.channel_banner_url.clone(),
-        local: item.local_playback, quality: item.quality.clone(), screen: item.screen,
+        local: item.local_playback, browser: item.browser.clone(), subtitles: item.subtitles,
+        quality: item.quality.clone(), screen: item.screen,
         autoplay_generated: item.autoplay_generated,
     }).collect()
 }
@@ -3371,9 +3594,9 @@ fn control_mpv(state: &mut State, operation: &str, value: Option<f64>) -> Result
         ("pause", _) => serde_json::json!(["set_property", "pause", true]),
         ("resume", _) => serde_json::json!(["set_property", "pause", false]),
         ("play_pause", _) => serde_json::json!(["cycle", "pause"]),
-        ("rewind", _) => serde_json::json!(["seek", -5, "relative"]),
-        ("forward", _) => serde_json::json!(["seek", 5, "relative"]),
-        ("seek", Some(position)) => serde_json::json!(["seek", position, "absolute"]),
+        ("rewind", _) => serde_json::json!(["osd-msg-bar", "seek", -5, "relative"]),
+        ("forward", _) => serde_json::json!(["osd-msg-bar", "seek", 5, "relative"]),
+        ("seek", Some(position)) => serde_json::json!(["osd-msg-bar", "seek", position, "absolute"]),
         ("volume", Some(volume)) => serde_json::json!(["set_property", "volume", volume * 100.0]),
         ("volume_up", _) => serde_json::json!(["add", "volume", 5]),
         ("volume_down", _) => serde_json::json!(["add", "volume", -5]),
@@ -3385,7 +3608,12 @@ fn control_mpv(state: &mut State, operation: &str, value: Option<f64>) -> Result
             let volume = volume.clamp(0.0, 100.0);
             state.last_mpv_volume = Some(volume / 100.0);
             // Keep volume feedback visible briefly after remote or dashboard changes.
-            let _ = mpv_ipc(path, serde_json::json!(["show-text", format!("Volume: {}%", volume.round() as u8), 1500]));
+            show_mpv_feedback(path, &format!("Volume: {}%", volume.round() as u8));
+        }
+    }
+    if matches!(operation, "pause" | "resume" | "play_pause") {
+        if let Some(paused) = mpv_property(path, "pause").and_then(|value| value.as_bool()) {
+            show_mpv_feedback(path, if paused { "Paused" } else { "Playing" });
         }
     }
     Ok(())
@@ -3630,6 +3858,7 @@ fn media_status(state: &mut State) -> Status {
     let bidi_video = refresh_librewolf_video(state);
     if state.current.as_ref().is_some_and(|item| item.local_playback) {
         if let Some(socket) = state.mpv_socket.as_deref() {
+            let tracks = mpv_property(socket, "track-list");
             let title = mpv_property(socket, "media-title").and_then(|v| v.as_str().map(str::to_string));
             let position_seconds = mpv_property(socket, "time-pos").and_then(|v| v.as_f64());
             let duration_seconds = mpv_property(socket, "duration").and_then(|v| v.as_f64());
@@ -3644,6 +3873,14 @@ fn media_status(state: &mut State) -> Status {
             );
             let playback_state = match paused { Some(true) => "paused", Some(false) => "playing", None => "unknown" }.to_string();
             return Status {
+                playback_epoch: state.playback_epoch,
+                subtitle_tracks: tracks.as_ref().map(|tracks| media_tracks(tracks,"sub")).unwrap_or_default(),
+                audio_tracks: tracks.as_ref().map(|tracks| media_tracks(tracks,"audio")).unwrap_or_default(),
+                tracks_available: tracks.is_some(),
+                close_at_epoch_ms: close_timer_expiration_epoch_ms(state),
+                close_remaining_seconds: state.close_deadline.map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()).as_secs_f64()),
+                close_timer_error: state.close_timer_error.clone(),
+                steam: state.steam.as_ref().map(|s| s.status()).unwrap_or_default(),
                 autoplay_status: autoplay_status_text(state),
                 autoplay_loading: state.autoplay_in_flight.is_some(), autoplay_error: state.autoplay_error.clone(),
                 current: state.current.as_ref().map(|item| safe_media_url(&item.url)),
@@ -3659,7 +3896,7 @@ fn media_status(state: &mut State) -> Status {
                 duration_seconds, volume, can_seek: duration_seconds.is_some_and(|d| d > 0.0),
                 previous_available: !state.history.is_empty(),
                 autoplay_enabled: state.autoplay_enabled,
-                autoplay_until_epoch_ms: autoplay_expiration_epoch_ms(state),
+                autoplay_until_epoch_ms: close_timer_expiration_epoch_ms(state),
             };
         }
     }
@@ -3694,6 +3931,11 @@ fn media_status(state: &mut State) -> Status {
         else if state.current.is_some() { "unknown".into() }
         else { "idle".into() };
     Status {
+        playback_epoch: state.playback_epoch, subtitle_tracks: Vec::new(), audio_tracks: Vec::new(), tracks_available: false,
+        close_at_epoch_ms: close_timer_expiration_epoch_ms(state),
+        close_remaining_seconds: state.close_deadline.map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()).as_secs_f64()),
+        close_timer_error: state.close_timer_error.clone(),
+        steam: state.steam.as_ref().map(|s| s.status()).unwrap_or_default(),
         autoplay_status: autoplay_status_text(state),
         autoplay_loading: state.autoplay_in_flight.is_some(), autoplay_error: state.autoplay_error.clone(),
         current: state.current.as_ref().map(|item| safe_media_url(&item.url)), queued: state.queue.iter().map(|item| safe_media_url(&item.url)).collect(),
@@ -3706,19 +3948,109 @@ fn media_status(state: &mut State) -> Status {
         duration_seconds, volume, can_seek: duration_seconds.is_some_and(|d| d > 0.0),
         previous_available: !state.history.is_empty(),
         autoplay_enabled: state.autoplay_enabled,
-        autoplay_until_epoch_ms: autoplay_expiration_epoch_ms(state),
+        autoplay_until_epoch_ms: close_timer_expiration_epoch_ms(state),
     }
 }
 
-fn autoplay_expiration_epoch_ms(state: &State) -> Option<u64> {
-    let remaining = state.autoplay_until?.checked_duration_since(std::time::Instant::now())?;
-    Some(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as u64 + remaining.as_millis() as u64)
+fn close_timer_expiration_epoch_ms(state: &State) -> Option<u64> {
+    let remaining = state.close_deadline?.saturating_duration_since(std::time::Instant::now());
+    let epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?;
+    u64::try_from(epoch.as_millis().checked_add(remaining.as_millis())?).ok()
+}
+
+fn close_timer_deadline(minutes: f64) -> Result<std::time::Instant, String> {
+    let invalid = || "minutes must be positive, finite, and within the supported clock range".to_string();
+    if !minutes.is_finite() || minutes <= 0.0 { return Err(invalid()); }
+    let duration = Duration::try_from_secs_f64(minutes * 60.0).map_err(|_| invalid())?;
+    if duration.is_zero() { return Err(invalid()); }
+    let epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_| invalid())?;
+    u64::try_from(epoch.as_millis().checked_add(duration.as_millis()).ok_or_else(invalid)?).map_err(|_| invalid())?;
+    std::time::Instant::now().checked_add(duration).ok_or_else(invalid)
+}
+
+fn set_close_timer(state: &mut State, minutes: Option<f64>) -> Result<(), String> {
+    let deadline = minutes.map(close_timer_deadline).transpose()?;
+    state.close_deadline = deadline;
+    state.close_timer_error = None;
+    Ok(())
+}
+
+fn close_all_playback(state: &mut State) -> Result<bool, String> {
+    state.close_deadline = None;
+    state.close_timer_error = None;
+    state.playback_epoch = state.playback_epoch.wrapping_add(1);
+    state.playback_error = None;
+    set_autoplay(state, false, None);
+    if let Some(cancel) = state.metadata_cancel.take() { cancel.store(true, Ordering::Release); }
+    state.metadata_in_flight = false;
+    state.metadata_in_flight_url = None;
+    state.autoplay_waiting_to_advance = false;
+    state.pending_metadata.clear(); state.pending_queue_metadata.clear();
+    let mut errors = Vec::new();
+    #[cfg(all(any(windows, target_os = "linux"), not(test)))]
+    let close_extra_browser = state.current.as_ref().is_some_and(|item| item.local_playback
+        || !item.browser.as_deref().is_some_and(|browser| browser.to_ascii_lowercase().contains("librewolf")));
+    if let Err(error) = stop_current(state) { errors.push(error); }
+    // The dashboard's managed browser can still be open beside mpv/Moonlight.
+    #[cfg(all(any(windows, target_os = "linux"), not(test)))]
+    if close_extra_browser {
+        if state.librewolf_bidi.is_none() { state.librewolf_bidi = librewolf_bidi_session().ok(); }
+        if let Some(mut bidi) = state.librewolf_bidi.take() {
+            if let Err(error) = bidi.close_browser() { errors.push(error); }
+        }
+    }
+    if let Some(mut child) = state.mirror.take() { terminate_child(&mut child); }
+    state.queue.clear();
+    let mut steam_closing = false;
+    match state.steam.as_ref().map(|session| session.close()).unwrap_or(Ok(false)) {
+        Ok(closing) => steam_closing = closing,
+        Err(error) => errors.push(error),
+    }
+    if errors.is_empty() { Ok(steam_closing) } else { Err(errors.join("; ")) }
+}
+
+fn expire_close_timer(state: &mut State, now: std::time::Instant) -> bool {
+    if !state.close_deadline.is_some_and(|deadline| now >= deadline) { return false; }
+    println!("Close timer expired; closing all managed playback");
+    if let Err(error) = close_all_playback(state) {
+        eprintln!("Close timer cleanup failed: {error}");
+        state.close_timer_error = Some(error);
+    }
+    true
 }
 
 #[cfg(not(windows))]
 fn controlled_player(state: &State) -> Result<String, String> {
     let browser = state.current.as_ref().and_then(|item| item.browser.as_deref());
     browser_player(browser).ok_or_else(|| "no browser MPRIS player found; start playback in the active desktop session".into())
+}
+
+fn flatpak_host_access_from_info(info: &str) -> bool {
+    let name = "org.freedesktop.Flatpak";
+    let mut in_policy = false;
+    let mut best: Option<(usize, bool)> = None;
+    for line in info.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_policy = line == "[Session Bus Policy]";
+            continue;
+        }
+        if !in_policy || line.starts_with('#') || line.starts_with(';') { continue; }
+        let Some((key, value)) = line.split_once('=') else { continue; };
+        let key = key.trim();
+        let matches = key == name || key.strip_suffix(".*").is_some_and(|prefix| name.starts_with(&format!("{prefix}.")));
+        if matches && best.is_none_or(|(length, _)| key.len() >= length) {
+            best = Some((key.len(), matches!(value.trim(), "talk" | "own")));
+        }
+    }
+    best.is_some_and(|(_, allowed)| allowed)
+}
+
+fn platform_info() -> serde_json::Value {
+    let flatpak = cfg!(target_os = "linux") && env::var_os("FLATPAK_ID").is_some();
+    let access = if flatpak {
+        std::fs::read_to_string("/.flatpak-info").ok().map(|info| flatpak_host_access_from_info(&info))
+    } else { None };
+    serde_json::json!({"os": env::consts::OS, "flatpak": flatpak, "steam_host_access_configured": access})
 }
 
 fn handle(mut request: Request, cfg: &Config, state: &mut State) {
@@ -3748,7 +4080,7 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         respond(request, 200, json(&current_playback_preferences(cfg)), "application/json"); return;
     }
     if method == Method::Get && path == "/platform" {
-        respond(request, 200, json(&serde_json::json!({"os": env::consts::OS})), "application/json"); return;
+        respond(request, 200, json(&platform_info()), "application/json"); return;
     }
     if method == Method::Post && path == "/settings/cookies/check" {
         let mut body = String::new();
@@ -3959,8 +4291,106 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         return;
     }
     if method == Method::Get && path == "/status" {
-        let value = media_status(state);
+        let mut value = media_status(state);
+        if value.steam.active && state.current.is_none() && state.mirror.is_none() {
+            value.title = Some(value.steam.games.first().map(|g| format!("Steam — {}", g.name.as_deref().unwrap_or(&g.app_id))).unwrap_or_else(|| "Steam".into()));
+            value.playback_state = format!("steam_{}", value.steam.phase);
+            value.playback_error = value.steam.error.clone();
+            value.playing = false; value.can_seek = false;
+            value.artist = None; value.album = None; value.artwork_url = None;
+            value.channel_avatar_url = None; value.channel_banner_url = None;
+            value.media_url = None; value.position_seconds = None;
+            value.duration_seconds = None; value.volume = None;
+        }
         respond(request, 200, json(&value), "application/json"); return;
+    }
+    if method == Method::Post && path == "/steam/bigpicture" {
+        let session = state.steam.get_or_insert_with(steam::Session::default);
+        match session.open() {
+            Ok(()) => respond(request, 202, "{\"ok\":true}".into(), "application/json"),
+            Err(error) => respond(request, 409, json(&serde_json::json!({"error":error})), "application/json"),
+        }
+        return;
+    }
+    if method == Method::Post && path == "/steam/close" {
+        let result = state.steam.as_ref().map(|s| s.close()).unwrap_or(Ok(false));
+        match result {
+            Ok(closing) => respond(request, if closing { 202 } else { 200 }, json(&serde_json::json!({"ok":true,"closing":closing})), "application/json"),
+            Err(error) => respond(request, 500, json(&serde_json::json!({"error":error})), "application/json"),
+        }
+        return;
+    }
+    if method == Method::Post && ["/subtitles/select", "/audio/select"].contains(&path.as_str()) {
+        let mut body = String::new();
+        if request.as_reader().take(4097).read_to_string(&mut body).is_err() || body.len() > 4096 {
+            respond(request, 400, "{\"error\":\"invalid track request\"}".into(), "application/json"); return;
+        }
+        let parsed: TrackSelectionRequest = match serde_json::from_str(&body) {
+            Ok(value) => value,
+            Err(error) => { respond(request, 400, json(&serde_json::json!({"error":error.to_string()})), "application/json"); return; }
+        };
+        if parsed.id.is_some_and(|id| id < 0) {
+            respond(request, 400, "{\"error\":\"track id must be non-negative or null for off\"}".into(), "application/json"); return;
+        }
+        if parsed.playback_epoch.is_some_and(|epoch| epoch != state.playback_epoch) {
+            respond(request, 409, "{\"error\":\"playback changed; refresh the track list\"}".into(), "application/json"); return;
+        }
+        let Some(socket) = state.mpv_socket.clone().filter(|_| state.current.as_ref().is_some_and(|item| item.local_playback)) else {
+            respond(request, 409, "{\"error\":\"track selection requires active local mpv playback\"}".into(), "application/json"); return;
+        };
+        let subtitles = path == "/subtitles/select";
+        let kind = if subtitles { "sub" } else { "audio" };
+        let Some(tracks) = mpv_property(&socket, "track-list") else {
+            respond(request, 409, "{\"error\":\"mpv track list is not ready\"}".into(), "application/json"); return;
+        };
+        let available = media_tracks(&tracks, kind);
+        let selected = parsed.id.and_then(|id| available.iter().find(|track| track.id == id));
+        if parsed.id.is_some() && selected.is_none() {
+            respond(request, 404, "{\"error\":\"track not found in current playback\"}".into(), "application/json"); return;
+        }
+        let mut preferences = current_playback_preferences(cfg);
+        if parsed.remember {
+            let choice = selected.and_then(|track| {
+                let choice = TrackMatch { language:track.language.clone(), title:track.title.clone() };
+                (choice.language.is_some() || choice.title.is_some()).then_some(choice)
+            });
+            if subtitles { preferences.subtitles = parsed.id.is_some(); preferences.track_preferences.subtitle = choice; }
+            else { preferences.track_preferences.audio_disabled = parsed.id.is_none(); preferences.track_preferences.audio = choice; }
+            if let Err(error) = validate_preferences(&preferences) {
+                respond(request, 400, json(&serde_json::json!({"error":error})), "application/json"); return;
+            }
+        }
+        let value = parsed.id.map(serde_json::Value::from).unwrap_or(serde_json::Value::String("no".into()));
+        if mpv_ipc(&socket, serde_json::json!(["set_property", if subtitles { "sid" } else { "aid" }, value])).is_err() {
+            respond(request, 409, "{\"error\":\"mpv could not switch the selected track\"}".into(), "application/json"); return;
+        }
+        if subtitles {
+            let _ = mpv_ipc(&socket, serde_json::json!(["set_property","sub-visibility",parsed.id.is_some()]));
+            // Off includes any secondary subtitle track, but keeps tracks loaded.
+            if parsed.id.is_none() { let _ = mpv_ipc(&socket, serde_json::json!(["set_property","secondary-sid","no"])); }
+            if let Some(item) = state.current.as_mut() { item.subtitles = Some(parsed.id.is_some()); }
+        }
+        if let Some((pending,_,_)) = state.pending_track_preferences.as_mut() {
+            if subtitles { pending.subtitle = None; } else { pending.audio = None; }
+        }
+        show_mpv_feedback(&socket, &track_feedback(subtitles, selected));
+        let saved = if parsed.remember { save_playback_preferences(preferences).map(|_| true) } else { Ok(false) };
+        respond(request, 200, json(&serde_json::json!({"ok":true,"preference_saved":saved.as_ref().copied().unwrap_or(false),"preference_error":saved.err()})), "application/json"); return;
+    }
+    if method == Method::Post && path == "/timer" {
+        let mut body = String::new();
+        if request.as_reader().take(4097).read_to_string(&mut body).is_err() || body.len() > 4096 {
+            respond(request, 400, "{\"error\":\"invalid timer request\"}".into(), "application/json"); return;
+        }
+        let parsed: CloseTimerRequest = match serde_json::from_str(&body) {
+            Ok(value) => value,
+            Err(error) => { respond(request, 400, json(&serde_json::json!({"error":error.to_string()})), "application/json"); return; }
+        };
+        match set_close_timer(state, parsed.minutes) {
+            Ok(()) => respond(request, 200, json(&serde_json::json!({"ok":true,"close_at_epoch_ms":close_timer_expiration_epoch_ms(state)})), "application/json"),
+            Err(error) => respond(request, 400, json(&serde_json::json!({"error":error})), "application/json"),
+        }
+        return;
     }
     if method == Method::Post && path == "/autoplay/error/clear" {
         state.autoplay_error = None;
@@ -3970,7 +4400,7 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         let mut body = String::new();
         if request.as_reader().read_to_string(&mut body).is_err() { respond(request, 400, "{\"error\":\"invalid body\"}".into(), "application/json"); return; }
         let parsed: AutoplayRequest = match serde_json::from_str(&body) { Ok(value) => value, Err(error) => { respond(request, 400, json(&serde_json::json!({"error": error.to_string()})), "application/json"); return; } };
-        if parsed.duration_minutes.is_some_and(|minutes| !(1..=1440).contains(&minutes)) { respond(request, 400, "{\"error\":\"autoplay duration must be from 1 to 1440 minutes\"}".into(), "application/json"); return; }
+        if parsed.duration_minutes.is_some_and(|minutes| close_timer_deadline(minutes).is_err()) { respond(request, 400, "{\"error\":\"minutes must be positive, finite, and within the supported clock range\"}".into(), "application/json"); return; }
         set_autoplay(state, parsed.enabled, parsed.duration_minutes);
         respond(request, 200, "{\"ok\":true}".into(), "application/json"); return;
     }
@@ -3978,7 +4408,7 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         let mut body = String::new();
         if request.as_reader().read_to_string(&mut body).is_err() { respond(request, 400, "{\"error\":\"invalid body\"}".into(), "application/json"); return; }
         let mut parsed: QueueItem = match serde_json::from_str(&body) { Ok(v) => v, Err(e) => { respond(request, 400, json(&serde_json::json!({"error": e.to_string()})), "application/json"); return; } };
-        if parsed.autoplay_minutes.is_some_and(|minutes| !(1..=1440).contains(&minutes)) { respond(request, 400, "{\"error\":\"autoplay duration must be from 1 to 1440 minutes\"}".into(), "application/json"); return; }
+        if parsed.autoplay_minutes.is_some_and(|minutes| close_timer_deadline(minutes).is_err()) { respond(request, 400, "{\"error\":\"minutes must be positive, finite, and within the supported clock range\"}".into(), "application/json"); return; }
         parsed.url = match clean_media_url(&parsed.url, false) { Ok(url) => url, Err(e) => { respond(request, 400, json(&serde_json::json!({"error": e})), "application/json"); return; } };
         if !youtube_url(&parsed.url) || !parsed.url.split_once('?').is_some_and(|(_, query)| query.split('&').any(|part| {
             let (key, value) = part.split_once('=').unwrap_or((part, ""));
@@ -3994,7 +4424,8 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
             Ok(urls) => urls,
             Err(e) => { respond(request, 422, json(&serde_json::json!({"error": e})), "application/json"); return; }
         };
-        if let Some(enabled) = parsed.autoplay { set_autoplay(state, enabled, parsed.autoplay_minutes); }
+        if let Some(minutes) = parsed.autoplay_minutes { let _ = set_close_timer(state, Some(minutes)); }
+        if let Some(enabled) = parsed.autoplay { set_autoplay(state, enabled, None); }
         let count = urls.len();
         let mut items = urls.into_iter().map(|url| { let mut item = parsed.clone(); item.url = url; item.title = None; item.uploader = None; item.thumbnail_url = None; item.channel_avatar_url = None; item.channel_banner_url = None; item }).collect::<Vec<_>>();
         if path == "/play_playlist" {
@@ -4036,6 +4467,9 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         }
         // Validate the whole selection before changing playback or the queue.
         for item in &mut parsed.items {
+            if item.start_position_seconds.is_some_and(|position| !position.is_finite() || position < 0.0) {
+                respond(request, 400, "{\"error\":\"start_position_seconds must be finite and non-negative\"}".into(), "application/json"); return;
+            }
             item.url = match clean_media_url(&item.url, item.local_playback) {
                 Ok(url) => url,
                 Err(error) => { respond(request, 400, json(&serde_json::json!({"error": error})), "application/json"); return; }
@@ -4065,17 +4499,38 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         }
         respond(request, 202, json(&serde_json::json!({"ok": true, "added": count})), "application/json"); return;
     }
-    if method == Method::Post && ["/play", "/queue", "/queue_next", "/play_preserve_queue"].contains(&path.as_str()) {
+    if method == Method::Post && ["/play", "/queue", "/queue_next", "/play_preserve_queue", "/play_interrupt"].contains(&path.as_str()) {
         let mut body = String::new();
         if request.as_reader().read_to_string(&mut body).is_err() { respond(request, 400, "{\"error\":\"invalid body\"}".into(), "application/json"); return; }
         let mut parsed: QueueItem = match serde_json::from_str(&body) { Ok(v) => v, Err(e) => { respond(request, 400, json(&serde_json::json!({"error": e.to_string()})), "application/json"); return; } };
-        if parsed.autoplay_minutes.is_some_and(|minutes| !(1..=1440).contains(&minutes)) { respond(request, 400, "{\"error\":\"autoplay duration must be from 1 to 1440 minutes\"}".into(), "application/json"); return; }
+        if parsed.start_position_seconds.is_some_and(|position| !position.is_finite() || position < 0.0) {
+            respond(request, 400, "{\"error\":\"start_position_seconds must be finite and non-negative\"}".into(), "application/json"); return;
+        }
+        if parsed.autoplay_minutes.is_some_and(|minutes| close_timer_deadline(minutes).is_err()) { respond(request, 400, "{\"error\":\"minutes must be positive, finite, and within the supported clock range\"}".into(), "application/json"); return; }
         if parsed.screen.or(current_playback_preferences(cfg).default_screen).is_some_and(|screen| screen > 32) {
             respond(request, 400, "{\"error\":\"display index must be from 0 to 32\"}".into(), "application/json"); return;
         }
         parsed.url = match clean_media_url(&parsed.url, parsed.local_playback) { Ok(url) => url, Err(e) => { respond(request, 400, json(&serde_json::json!({"error": e})), "application/json"); return; } };
+        if path == "/play_interrupt" && state.current.is_some() {
+            if let Err(error) = ytdl_format_selector(&current_playback_preferences(cfg).default_video_codec, parsed.quality.as_deref()) {
+                respond(request, 400, json(&serde_json::json!({"error": error})), "application/json"); return;
+            }
+            let status = media_status(state);
+            if state.pending_browser_resume.is_some() {
+                respond(request, 409, "{\"error\":\"current video must report a seekable position before it can be interrupted\"}".into(), "application/json"); return;
+            }
+            let interrupted = match interrupted_item(state.current.as_ref().expect("current item exists"), &status) {
+                Ok(item) => item,
+                Err(error) => { respond(request, 409, json(&serde_json::json!({"error": error})), "application/json"); return; }
+            };
+            if let Err(error) = control_media(state, "pause", None) {
+                respond(request, 409, json(&serde_json::json!({"error": error})), "application/json"); return;
+            }
+            state.queue.push_front(interrupted);
+        }
         if parsed.url.starts_with("smb://") && !parsed.local_playback { respond(request, 400, "{\"error\":\"SMB links require local mpv playback\"}".into(), "application/json"); return; }
-        if let Some(enabled) = parsed.autoplay { set_autoplay(state, enabled, parsed.autoplay_minutes); }
+        if let Some(minutes) = parsed.autoplay_minutes { let _ = set_close_timer(state, Some(minutes)); }
+        if let Some(enabled) = parsed.autoplay { set_autoplay(state, enabled, None); }
         parsed.browser = parsed.browser.map(|b| b.trim().to_string()).filter(|b| !b.is_empty());
         if path == "/queue_next" && state.current.is_some() {
             state.queue.push_front(parsed);
@@ -4085,13 +4540,18 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
             if at_end { state.queue.push_back(parsed); } else { enqueue_explicit_item(state, parsed); }
         }
         else {
-            if path == "/play" || path == "/play_preserve_queue" {
+            if path == "/play" || path == "/play_preserve_queue" || path == "/play_interrupt" {
                 state.playback_epoch = state.playback_epoch.wrapping_add(1);
                 state.playback_error = None;
-                if let Some(current) = state.current.clone() { push_history(state, current); }
+                if path != "/play_interrupt" {
+                    if let Some(current) = state.current.clone() { push_history(state, current); }
+                }
                 if path == "/play" { state.queue.clear(); }
             }
-            let _ = stop_current(state);
+            let stopped = stop_current(state);
+            if path == "/play_interrupt" {
+                if let Err(error) = stopped { respond(request, 409, json(&serde_json::json!({"error": error})), "application/json"); return; }
+            }
             if let Err(e) = start_url(state, cfg, parsed) { respond(request, 500, json(&serde_json::json!({"error": e})), "application/json"); return; }
         }
         for item in &state.queue {
@@ -4133,21 +4593,9 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         respond(request, 200, "{\"ok\":true}".into(), "application/json"); return;
     }
     if method == Method::Post && path == "/close" {
-        state.playback_epoch = state.playback_epoch.wrapping_add(1);
-        state.playback_error = None;
-        set_autoplay(state, false, None);
-        if let Some(cancel) = state.metadata_cancel.take() { cancel.store(true, Ordering::Release); }
-        state.metadata_in_flight = false;
-        state.metadata_in_flight_url = None;
-        state.autoplay_waiting_to_advance = false;
-        state.pending_metadata.clear();
-        state.pending_queue_metadata.clear();
-        let close_result = stop_current(state);
-        if let Some(mut child) = state.mirror.take() { let _ = child.kill(); let _ = child.wait(); }
-        state.queue.clear();
-        match close_result {
-            Ok(()) => respond(request, 200, "{\"ok\":true}".into(), "application/json"),
-            Err(error) => respond(request, 409, json(&serde_json::json!({"error": format!("playback state was cleared but LibreWolf did not confirm it closed: {error}")})), "application/json"),
+        match close_all_playback(state) {
+            Ok(closing) => respond(request, if closing { 202 } else { 200 }, json(&serde_json::json!({"ok":true,"closing":closing})), "application/json"),
+            Err(error) => respond(request, 409, json(&serde_json::json!({"error":error})), "application/json"),
         }
         return;
     }
@@ -4323,6 +4771,7 @@ fn run_server(cfg: Config, shutdown: Option<Arc<AtomicBool>>) -> Result<Option<S
         default_video_codec: cfg.default_video_codec.clone(),
         subtitles: cfg.subtitles,
         preferred_language: cfg.preferred_language.clone(),
+        track_preferences: cfg.track_preferences.clone(),
         cookies_browser,
         cookies_profile,
     }));
@@ -4490,6 +4939,12 @@ fn main() {
         Err(error) => { append_linux_log(error); std::process::exit(2); }
     };
     let has_desktop_session = env::var_os("DISPLAY").is_some() || env::var_os("WAYLAND_DISPLAY").is_some();
+    if env::var_os("FLATPAK_ID").is_some() {
+        // The Flatpak's single-instance GApplication owns desktop activation,
+        // background registration and Quit; it does not need a second tray loop.
+        run_linux_server(cfg);
+        return;
+    }
     if !has_desktop_session {
         append_linux_log("No graphical desktop session detected; starting MediaBridge without a tray icon.".into());
         run_linux_server(cfg);

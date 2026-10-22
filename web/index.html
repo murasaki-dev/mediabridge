@@ -8,9 +8,49 @@
   <style>
     :root { font: 16px/1.45 system-ui, sans-serif; color: #edf2f7; background: #11151b; }
     * { box-sizing: border-box; }
-    body { max-width: 820px; margin: 0 auto; padding: 24px 16px 48px; }
+    body { max-width: 1160px; margin: 0 auto; padding: 20px 20px 48px; }
+    header { padding: 8px 0 16px; border-bottom: 1px solid #303945; }
     h1 { margin: 0; font-size: 1.5rem; } h2 { font-size: 1rem; margin: 0 0 12px; }
-    .muted { color: #a4afbd; } .card { margin-top: 16px; padding: 18px; border: 1px solid #303945; border-radius: 12px; background: #1a2029; }
+    .muted { color: #a4afbd; font-size: .875rem; } .card { margin-top: 16px; padding: 18px; border: 1px solid #303945; border-radius: 14px; background: #1a2029; min-width: 0; }
+    .dashboard-grid { display: grid; grid-template-columns: minmax(0,1.15fr) minmax(0,1fr); gap: 16px; align-items: start; margin-top: 16px; }
+    .dashboard-column { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+    .dashboard-grid .card { margin-top: 0; }
+    .card > h2, .settings-group > summary { display: inline-block; }
+    summary { cursor: pointer; color: #cbd7e5; padding: 8px 0; font-weight: 600; }
+    details:not(.help) { border-top: 1px solid #303945; margin-top: 12px; }
+    details:not(.help) > summary:hover { color: #74cfff; }
+    .settings-group { border: 1px solid #303945 !important; border-radius: 12px; padding: 4px 14px 14px; background: #1a2029; }
+    .settings-group > summary { display: list-item; padding: 12px 0; }
+    .settings-group .card { border: 0; padding: 0; background: none; }
+    .settings-group h2 { display: none; }
+    .help { display: inline-block; position: relative; vertical-align: middle; margin: 0 0 4px 6px; font-size: .8rem; }
+    .help > summary { list-style: none; display: grid; place-items: center; width: 26px; height: 26px; padding: 0; border: 1px solid #53647a; border-radius: 50%; color: #b7d5ef; font-weight: 600; }
+    .help > summary::-webkit-details-marker { display: none; }
+    .help > [role=note] { display: none; position: absolute; z-index: 30; top: 32px; left: 0; width: min(290px,70vw); padding: 12px; border: 1px solid #53647a; border-radius: 10px; background: #0d141e; color: #dce6f0; box-shadow: 0 8px 25px #0008; font-weight: 400; }
+    #settings-drawer .help > [role=note] { position: fixed; top: auto; bottom: 18px; left: 18px; width: min(390px,84vw); max-height: 35vh; overflow: auto; }
+    .help[open] > [role=note], .help:hover > [role=note], .help:focus-within > [role=note] { display: block; }
+    :focus-visible { outline: 2px solid #74cfff; outline-offset: 3px; }
+    .option-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
+    .option-grid select, .option-grid input { width: 100%; min-width: 0; }
+    .playback-mode { display: block; margin-bottom: 12px; }
+    #mode { width: 100%; min-width: 0; }
+    .primary-actions { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; margin-top: 12px; }
+    .primary-actions button { padding-inline: 4px; }
+    .row.transport-controls { display: flex; justify-content: center; flex-wrap: nowrap; gap: 6px; }
+    .row.transport-controls button { display: inline-grid; place-items: center; flex: 0 0 44px; width: 44px; height: 44px; padding: 10px; border-radius: 50%; }
+    .transport-controls svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+    .transport-controls #play-toggle { background: #176b9a; border-color: #2789ba; }
+    .transport-controls #quit { background: #482127; border-color: #81444b; color: #ffc4ca; }
+    @media (max-width: 360px) { .row.transport-controls { gap: 4px; } .row.transport-controls button { flex-basis: 40px; width: 40px; height: 40px; padding: 8px; } }
+    .row:has(> #volume) button { flex: 0 0 42px; }
+    header.row > button { flex: 0 0 auto; }
+    #title { font-size: 1.12rem; font-weight: 650; overflow-wrap: anywhere; }
+    #playback-state { display: inline-block; margin: 6px 8px 8px 0; color: #74cfff; }
+    #hardware-decoder { display: inline; }
+    #history-card > details { border: 0; margin: 0; }
+    #history-card > details > summary { padding: 0; }
+    #track-controls select { width: 100%; }
+    #queue .row button, #history .row button { font-size: .8rem; padding: 6px 9px; }
     .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
     label { display: block; margin: 10px 0 5px; color: #c5ced8; }
     input, select, textarea, button { font: inherit; color: inherit; border: 1px solid #465363; border-radius: 8px; background: #121820; padding: 9px 11px; }
@@ -24,31 +64,37 @@
     .row input[type=range] { flex: 1; width: auto; min-width: 100px; }
     #message { min-height: 1.5em; margin-top: 8px; color: #ffc66d; overflow-wrap: anywhere; }
     #playback-error { margin: 10px 0; padding: 10px 12px; border: 1px solid #a4444c; border-radius: 8px; color: #ffd7d9; background: #482127; overflow-wrap: anywhere; }
-    #queue { padding-left: 22px; } #queue li { margin: 7px 0; overflow-wrap: anywhere; }
+    #queue, #history { padding-left: 22px; } #queue li, #history li { margin: 12px 0; overflow-wrap: anywhere; }
+    .item-error { color: #ffc66d; overflow-wrap: anywhere; }
+    #autoplay-error { color: #ffd7d9; overflow-wrap: anywhere; }
     #remote-origin-list { list-style: none; padding: 0; margin: 10px 0; }
     #remote-origin-list li { display: flex; align-items: center; gap: 10px; margin: 7px 0; overflow-wrap: anywhere; }
     #settings-backdrop { position: fixed; inset: 0; z-index: 20; border: 0; border-radius: 0; background: #0009; opacity: 0; visibility: hidden; transition: opacity .2s, visibility .2s; }
-    #settings-drawer { position: fixed; inset: 0 auto 0 0; z-index: 21; width: min(430px, 92vw); padding: 22px 18px 32px; overflow-y: auto; background: #111820; border-right: 1px solid #394553; box-shadow: 18px 0 44px #0008; transform: translateX(-105%); transition: transform .22s ease; }
-    body.settings-open #settings-drawer { transform: translateX(0); }
+    #settings-drawer { position: fixed; inset: 0 auto 0 0; z-index: 21; width: min(460px, 94vw); padding: 18px 18px 32px; overflow-y: auto; background: #111820; border-right: 1px solid #394553; box-shadow: 18px 0 44px #0008; transform: translateX(-105%); visibility: hidden; transition: transform .22s ease, visibility .22s; }
+    body.settings-open #settings-drawer { transform: translateX(0); visibility: visible; }
+    body.settings-open { overflow: hidden; }
+    #settings-drawer > .row { position: sticky; top: -18px; background: #111820; padding-block: 12px; z-index: 5; }
     body.settings-open #settings-backdrop { opacity: 1; visibility: visible; }
     #settings-drawer .card { margin-top: 14px; }
     .artwork { position: relative; max-width: 100%; margin: 12px 0; }
-    .artwork img.banner { display: block; width: 100%; max-height: 230px; object-fit: cover; border-radius: 9px; }
-    .artwork img.thumbnail { display: block; width: 100%; max-height: 360px; object-fit: contain; background: #090c10; border-radius: 9px; }
+    .artwork img.banner { display: block; width: 100%; max-height: 80px; object-fit: cover; border-radius: 9px; }
+    .artwork img.thumbnail { display: block; width: 100%; max-height: 210px; object-fit: contain; background: #090c10; border-radius: 9px; }
     .artwork img.avatar { position: absolute; left: 12px; bottom: 12px; width: 68px; height: 68px; object-fit: cover; border: 3px solid #1a2029; border-radius: 50%; background: #11151b; }
     .queue-art { width: 56px; height: 40px; object-fit: cover; border-radius: 5px; margin-right: 8px; vertical-align: middle; background: #11151b; }
     .account-avatar { width: 52px; height: 52px; object-fit: cover; border-radius: 50%; background: #11151b; border: 1px solid #465363; }
     #touchpad { height: 210px; border: 2px solid #465363; border-radius: 12px; background: linear-gradient(145deg,#151c25,#202a36); touch-action: none; user-select: none; display: grid; place-items: center; color: #a4afbd; }
     #touchpad.active { border-color: #35a6df; background: #1b2d3b; }
-    @media (max-width: 520px) { .card { padding: 14px; } .row > button { flex: 1; } }
+    @media (max-width: 760px) { .dashboard-grid { display: flex; flex-direction: column; } .dashboard-grid > .card { width: 100%; } body { padding: 12px 12px 32px; } }
+    @media (max-width: 520px) { .card { padding: 14px; } .row > button { flex: 1; } select { max-width: 100%; } .help > [role=note] { position: fixed; top: auto; bottom: 18px; left: 5vw; width: 90vw; max-height: 40vh; overflow: auto; } }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; } }
   </style>
 </head>
 <body>
   <header class="row"><button id="toggle-settings" type="button" aria-expanded="false" aria-controls="settings-drawer">☰ Settings</button><h1>MediaBridge</h1><span id="connection" class="muted grow">Connecting…</span></header>
   <div id="onboarding-slot"></div>
   <section id="account-setup-card" class="card" aria-labelledby="accounts-heading">
-    <h2 id="accounts-heading">Connect your accounts</h2>
-    <p class="muted">On the MediaBridge computer, use the sign-in buttons to open the persistent browser profile without playback automation. This closes the dashboard and stops current playback. After signing in, close LibreWolf and reopen the dashboard, then check whether each site's cookies can be read. YouTube can also report the active channel and profile picture. Twitch currently confirms that its sign-in cookie is present; it cannot verify the session or identify the account yet.</p>
+    <h2 id="accounts-heading">Accounts</h2><p class="muted">Sign-in closes playback and this dashboard. Reopen when finished.</p>
+    <details class="help"><summary aria-label="Account sign-in help" aria-describedby="help-1">?</summary><div id="help-1" role="note">On the MediaBridge computer, use the sign-in buttons to open the persistent browser profile without playback automation. This closes the dashboard and stops current playback. After signing in, close LibreWolf and reopen the dashboard, then check whether each site's cookies can be read. YouTube can also report the active channel and profile picture. Twitch currently confirms that its sign-in cookie is present; it cannot verify the session or identify the account yet.</div></details>
     <div class="row" style="margin:12px 0">
       <strong class="grow">YouTube</strong><img id="youtube-account-avatar" class="account-avatar hidden" alt="YouTube profile picture"><span id="youtube-account-status" class="muted" role="status">Not checked</span>
       <button type="button" data-account-login="youtube">Sign in</button><button type="button" data-account-check="youtube">Check</button>
@@ -57,111 +103,185 @@
       <strong class="grow">Twitch</strong><img id="twitch-account-avatar" class="account-avatar hidden" alt="Twitch profile picture"><span id="twitch-account-status" class="muted" role="status">Not checked</span>
       <button type="button" data-account-login="twitch">Sign in</button><button type="button" data-account-check="twitch">Check</button>
     </div>
-    <div class="row"><button id="finish-account-setup" type="button">Done — move to Settings</button></div>
+    <div class="row"><button id="finish-account-setup" type="button">Done</button></div>
   </section>
   <button id="settings-backdrop" class="hidden" type="button" aria-label="Close settings"></button>
-  <aside id="settings-drawer" aria-hidden="true" aria-label="Permanent settings">
+  <aside id="settings-drawer" inert role="dialog" aria-modal="true" aria-hidden="true" aria-label="Server settings">
     <div class="row"><h2 style="margin:0;flex:1">Settings</h2><button id="close-settings" type="button">Close</button></div>
-    <div id="account-settings-slot"></div>
-    <section class="card" aria-labelledby="remote-settings-heading">
+    <details id="account-settings-group" class="settings-group"><summary>Accounts</summary><div id="account-settings-slot"></div></details>
+    <details class="settings-group"><summary>Network access</summary><section class="card" aria-labelledby="remote-settings-heading">
       <h2 id="remote-settings-heading">Remote origin servers</h2>
-      <p class="muted">Allow specific web apps to control this MediaBridge from a browser. Enter the site's origin (scheme, host, and optional port), without a path. Only add sites you trust.</p>
+      <details class="help"><summary aria-label="Allowed origins help" aria-describedby="help-2">?</summary><div id="help-2" role="note">Allow specific web apps to control this MediaBridge from a browser. Enter the site's origin (scheme, host, and optional port), without a path. Only add sites you trust.</div></details>
       <div class="row"><input id="remote-origin-input" class="grow" type="url" placeholder="https://party.example" aria-label="Web app origin"><button id="add-remote-origin" type="button">Add origin</button></div>
       <ul id="remote-origin-list"><li class="muted">Loading…</li></ul>
       <div class="row"><button id="save-remote-origins" class="primary" type="button">Save allowed origins</button><span id="remote-origin-status" class="muted" role="status"></span></div>
     </section>
-    <section class="card" aria-labelledby="playback-defaults-heading">
+    </details><details class="settings-group" open><summary>Playback defaults</summary><section class="card" aria-labelledby="playback-defaults-heading">
       <h2 id="playback-defaults-heading">Playback defaults</h2>
-      <label for="default-quality">Default maximum resolution</label>
+      <label for="default-quality">Resolution</label>
       <select id="default-quality"><option value="2160">4K · 2160p</option><option value="1440">1440p</option><option value="1080">1080p</option><option value="720" selected>720p</option><option value="480">480p</option></select>
-      <label for="default-video-codec">Preferred video codec</label>
-      <select id="default-video-codec"><option value="h264" selected>H.264 first, then VP9</option><option value="vp9">VP9 first, then H.264</option><option value="auto">Automatic selection</option></select>
-      <p class="muted">The preferred codec is tried first; other available formats remain as fallbacks.</p>
-      <label for="default-screen">Preferred monitor index</label>
-      <input id="default-screen" type="number" min="0" max="32" step="1" placeholder="Automatic">
-      <p class="muted">This selects mpv's display on Linux and Windows. On Windows it also selects the display for managed LibreWolf video playback.</p>
+      <label for="default-video-codec">Video codec</label>
+      <select id="default-video-codec"><option value="h264" selected>H.264 preferred</option><option value="vp9">VP9 preferred</option><option value="auto">Automatic selection</option></select>
+      <details class="help"><summary aria-label="Video codec help" aria-describedby="help-3">?</summary><div id="help-3" role="note">The preferred codec is tried first; other available formats remain as fallbacks.</div></details>
+      <label for="default-screen">Display index</label>
+      <input id="default-screen" type="number" min="0" max="32" step="1" placeholder="Auto">
+      <details class="help"><summary aria-label="Display selection help" aria-describedby="help-4">?</summary><div id="help-4" role="note">This selects mpv's display on Linux and Windows. On Windows it also selects the display for managed LibreWolf video playback.</div></details>
       <label style="display:flex;gap:8px;align-items:center"><input id="default-subtitles" type="checkbox"> Load subtitles by default</label>
       <label for="preferred-language">Preferred subtitle language</label>
       <input id="preferred-language" type="text" placeholder="For example: en" autocomplete="off">
-      <label for="cookies-browser">YouTube cookies for local mpv</label>
+      <label><input id="default-multiple-audio" type="checkbox"> Alternate audio tracks</label>
+      <details class="help"><summary aria-label="Alternate audio help" aria-describedby="help-5">?</summary><div id="help-5" role="note">Off requests the original/default extracted audio only. Alternate formats are opened when selected; bandwidth savings depend on the source. Embedded tracks in one file remain available.</div></details>
+      <details><summary>Browser cookies</summary>
+      <label for="cookies-browser">Cookie source</label>
       <select id="cookies-browser"><option value="auto">System default browser (automatic)</option><option value="librewolf">MediaBridge LibreWolf</option><option value="chrome">Google Chrome</option><option value="chromium">Chromium</option><option value="edge">Microsoft Edge</option><option value="firefox">Firefox</option><option value="brave">Brave</option><option value="opera">Opera</option><option value="vivaldi">Vivaldi</option><option value="whale">Whale</option><option value="off">Off</option></select>
       <label for="cookies-profile">Browser profile (optional)</label>
       <input id="cookies-profile" type="text" placeholder="Default, Profile 1, or Firefox profile name" autocomplete="off">
-      <p class="muted">Uses the persistent MediaBridge LibreWolf profile through yt-dlp. MediaBridge does not access your YouTube account through OAuth. Sign in from the Connect your accounts section, then check cookie access here or in that section.</p>
+      <details class="help"><summary aria-label="Browser cookie help" aria-describedby="help-6">?</summary><div id="help-6" role="note">Uses the persistent MediaBridge LibreWolf profile through yt-dlp. MediaBridge does not access your YouTube account through OAuth. Sign in from the Connect your accounts section, then check cookie access here or in that section.</div></details>
       <div class="row"><button id="check-cookies" type="button">Check cookie access</button><img id="youtube-channel-avatar" class="avatar hidden" alt="YouTube channel profile picture"><span id="cookies-status" class="muted" role="status"></span></div>
-      <div class="row" style="margin-top:12px"><button id="save-playback-preferences" class="primary" type="button">Save playback defaults</button><span id="preferences-status" class="muted" role="status"></span></div>
+      </details>
+      <div class="row" style="margin-top:12px"><button id="save-playback-preferences" class="primary" type="button">Save defaults</button><span id="preferences-status" class="muted" role="status"></span></div>
     </section>
-    <section class="card" aria-labelledby="server-port-heading">
+    </details><details id="flatpak-host-settings" class="settings-group hidden"><summary>Steam host access</summary>
+      <p id="flatpak-host-status" class="muted" role="status"></p>
+      <p class="muted">This permission allows commands to run as your user outside Flatpak. MediaBridge cannot grant it to itself.</p>
+      <label for="flatpak-host-command">Run once in a terminal on the MediaBridge computer</label>
+      <textarea id="flatpak-host-command" readonly spellcheck="false">flatpak override --user --talk-name=org.freedesktop.Flatpak io.github.murasaki_dev.MediaBridge</textarea>
+      <p class="muted">Quit MediaBridge using GNOME's ×, then reopen it. Host Python 3 and libX11 are also required.</p>
+      <button id="flatpak-host-recheck" type="button">Recheck access</button>
+    </details><details class="settings-group"><summary>Server port</summary><section class="card" aria-labelledby="server-port-heading">
       <h2 id="server-port-heading">Server port</h2>
       <label for="server-port">TCP port</label>
       <input id="server-port" type="number" min="1" max="65535" step="1" inputmode="numeric">
-      <p class="muted">Applying a different port restarts MediaBridge and moves this dashboard to the new address. If you connect from another device, allow the new port through the host firewall. On Windows, update the MediaBridge Server firewall rule to the new port.</p>
+      <details class="help"><summary aria-label="Server port help" aria-describedby="help-7">?</summary><div id="help-7" role="note">Applying a different port restarts MediaBridge and moves this dashboard to the new address. If you connect from another device, allow the new port through the host firewall. On Windows, update the MediaBridge Server firewall rule to the new port.</div></details>
       <div class="row"><button id="apply-server-port" class="primary" type="button">Apply and restart</button><span id="server-port-status" class="muted" role="status"></span></div>
     </section>
+    </details>
   </aside>
-  <section class="card">
+  <main id="dashboard" class="dashboard-grid">
+  <section id="now-playing-card" class="card">
+    <h2>Now playing</h2>
+    <details id="browser-controls-note" class="help hidden"><summary aria-label="Browser playback information" aria-describedby="browser-controls-text">?</summary><div id="browser-controls-text" role="note"></div></details>
+    <div id="artwork" class="artwork hidden"><img id="banner" class="banner hidden" alt="Channel banner"><img id="thumbnail" class="thumbnail hidden" alt="Video thumbnail"><img id="avatar" class="avatar hidden" alt="Channel profile picture"></div>
+    <div id="title">Nothing playing</div><div id="playback-state" class="muted">Idle</div>
+    <div id="hardware-decoder" class="muted"></div>
+    <details id="track-controls" class="hidden"><summary>Audio &amp; subtitles</summary><details class="help"><summary aria-label="Track selection help" aria-describedby="track-help">?</summary><div id="track-help" role="note">Choose a loaded track or Off. Remember saves language/title preferences for later videos; uncheck it to change only this video.</div></details>
+      <label for="subtitle-track">Subtitle track</label><select id="subtitle-track" aria-label="Subtitle track"></select>
+      <label for="audio-track">Audio track</label><select id="audio-track" aria-label="Audio track"></select>
+      <label><input id="remember-tracks" type="checkbox" checked> Remember track choices</label>
+      <p id="track-status" class="muted" role="status">Choose a track or Off.</p>
+    </details>
+    <div id="playback-error" class="hidden" role="alert"></div>
+    <div class="time"><span id="position">0:00</span><span id="duration">0:00</span></div>
+    <input id="seek" type="range" min="0" max="0" value="0" disabled aria-label="Seek position">
+    <div class="row transport-controls" style="margin-top:12px">
+      <button id="previous" type="button" aria-label="Previous video" title="Previous video" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5v14M19 5 9 12l10 7Z"/></svg></button>
+      <button data-control="rewind" type="button" aria-label="Back 5 seconds" title="Back 5 seconds"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9a8 8 0 1 1 0 7M4 4v5h5"/><text x="12" y="16" text-anchor="middle" fill="currentColor" stroke="none" font-size="11" font-family="system-ui">5</text></svg></button>
+      <button id="play-toggle" data-control="play_pause" type="button" aria-label="Play" title="Play" disabled><svg id="play-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m8 5 11 7-11 7Z" fill="currentColor" stroke="none"/></svg><svg id="pause-icon" class="hidden" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14M16 5v14" stroke-width="4"/></svg></button>
+      <button data-control="forward" type="button" aria-label="Forward 5 seconds" title="Forward 5 seconds"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 9a8 8 0 1 0 0 7M20 4v5h-5"/><text x="12" y="16" text-anchor="middle" fill="currentColor" stroke="none" font-size="11" font-family="system-ui">5</text></svg></button>
+      <button id="next" type="button" aria-label="Next video" title="Next video" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 5v14M5 5l10 7-10 7Z"/></svg></button>
+      <button id="quit" type="button" aria-label="Close all playback" title="Close all playback, including browser, Moonlight, and managed Steam"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none"/></svg></button>
+    </div>
+    <label for="volume">Volume <span id="volume-label">—</span></label>
+    <div class="row"><button data-control="volume_down" aria-label="Volume down">−</button><input id="volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume"><button data-control="volume_up" aria-label="Volume up">+</button></div>
+  </section>
+  <section id="add-media-card" class="card">
     <h2>Add media</h2>
+    <div class="playback-mode">
+      <div><label for="mode">Play with</label><select id="mode"><option value="local">Direct player (mpv)</option><option value="browser">Web browser</option><option value="sunshine">Sunshine / Moonlight</option></select></div>
+    </div>
     <div id="media-controls">
     <label for="url">Paste a website, video, or stream URL</label>
     <textarea id="url" placeholder="https://example.com or smb://server/share/video.mp4"></textarea>
-    <div class="row">
-      <div><label for="mode">Playback</label><select id="mode"><option value="local">Direct player (mpv + yt-dlp)</option><option value="browser">Web browser</option><option value="sunshine">Sunshine / Moonlight</option></select></div>
+    <details><summary>Playback options</summary><div class="option-grid">
       <div id="quality-wrap"><label for="quality">Maximum quality</label><select id="quality"><option value="2160">4K · 2160p</option><option value="1440">1440p</option><option value="1080">1080p</option><option value="720" selected>720p</option><option value="480">480p</option></select></div>
       <div id="screen-wrap"><label id="screen-label" for="screen">mpv display index</label><input id="screen" type="number" min="0" max="32" step="1" placeholder="Default" style="width:110px"><small id="screen-help" class="muted">Optional, starts at 0</small></div>
       <div id="browser-wrap" class="hidden"><label for="browser">Browser</label><select id="browser"><option value="chromium">Chromium</option><option value="firefox">Firefox</option><option value="librewolf">MediaBridge LibreWolf</option><option value="">System default</option></select></div>
     </div>
     <label style="display:flex;gap:8px;align-items:center;margin-top:10px"><input id="subtitles" type="checkbox"> Load subtitles (slower)</label>
-    <label style="display:flex;gap:8px;align-items:center;margin-top:8px"><input id="autoplay-after-queue" type="checkbox"> Enable autoplay after this queue</label>
-    <label for="autoplay-duration">Turn autoplay off after</label><select id="autoplay-duration"><option value="0">Manually</option><option value="30">30 minutes</option><option value="60">1 hour</option><option value="120">2 hours</option><option value="240">4 hours</option></select>
-    <div class="row" style="margin-top:14px">
-      <button id="preview">Preview link</button><button id="play-now" class="primary">Play now</button><button id="play-next">Play next</button><button id="play-last">Play last</button>
-    </div>
+    <label><input id="multiple-audio" type="checkbox"> Alternate audio tracks</label>
+    <label style="display:flex;gap:8px;align-items:center;margin-top:8px"><input id="autoplay-after-queue" type="checkbox"> Continue with YouTube Mix</label>
+    <details><summary>Attribution and SMB access</summary>
+      <label for="submitter-id">Submitter ID (optional)</label><input id="submitter-id" type="text" autocomplete="off">
+      <details class="help"><summary aria-label="Submitter attribution help" aria-describedby="help-8">?</summary><div id="help-8" role="note">A caller-provided label, not a verified account. Also used when keeping a Mix suggestion.</div></details>
+      <label for="smb-share-id">SMB provider reference (optional)</label><input id="smb-share-id" type="text" autocomplete="off" maxlength="24">
+      <details class="help"><summary aria-label="SMB provider help" aria-describedby="help-9">?</summary><div id="help-9" role="note">Use a 24-character hexadecimal reference from your configured provider. MediaBridge does not store SMB passwords or browse shares. Leave blank for direct guest access. Applies only to SMB links.</div></details>
+    </details>
+    </details>
+    <div class="primary-actions"><button id="play-now" class="primary" title="Replace playback and the waiting queue">Play now</button><button id="play-next" title="Insert first in the waiting queue">Queue next</button><button id="play-last" title="Add after manual items, before Mix suggestions">Queue</button></div>
+    <details><summary>More play actions</summary><div class="row"><button id="preview">Preview</button><button id="play-preserve" title="Replace the current video while keeping all waiting items">Play · keep queue</button><button id="play-interrupt" title="Play this video now; resume the interrupted video next at its saved timestamp">Interrupt &amp; resume</button><button id="append-tail" title="Append after every waiting item, including Mix suggestions">Queue at end</button></div></details>
+    <details style="margin-top:12px"><summary>Add a batch</summary>
+      <label for="batch-urls">One video URL per line (up to 200)</label><textarea id="batch-urls" placeholder="https://example.com/a.mp4&#10;https://example.com/b.mp4"></textarea>
+      <details class="help"><summary aria-label="Batch queue help" aria-describedby="help-10">?</summary><div id="help-10" role="note">Uses the playback settings and optional submitter/provider reference above. Adds each URL as one item; playlist links are not expanded.</div></details>
+      <div class="row"><button id="batch-next" type="button">Add batch next</button><button id="batch-last" type="button">Add batch last</button></div>
+    </details>
     </div>
     <div id="sunshine-wrap" class="hidden" aria-labelledby="sunshine-heading">
       <h3 id="sunshine-heading">Connect to Sunshine</h3>
-      <p id="sunshine-pair-hint" class="muted">Enter the Sunshine PC's IP address or host name. For first-time setup, pair this MediaBridge Moonlight client with Sunshine. Moonlight will show a PIN; enter it in Sunshine's pairing page, then close Moonlight's success dialog. MediaBridge will verify the saved pairing and remember setup in this dashboard.</p>
+      <details id="sunshine-pair-hint" class="help"><summary aria-label="Pairing help" aria-describedby="sunshine-pair-help">?</summary><div id="sunshine-pair-help" role="note">Enter the Sunshine PC's IP address or host name. For first-time setup, pair this MediaBridge Moonlight client with Sunshine. Moonlight will show a PIN; enter it in Sunshine's pairing page, then close Moonlight's success dialog. MediaBridge will verify the saved pairing and remember setup in this dashboard.</div></details>
       <div class="row"><input id="sunshine-host" class="grow" type="text" placeholder="192.168.1.50" autocomplete="off" aria-label="Sunshine host address"><input id="sunshine-app" type="text" value="Desktop" placeholder="Desktop" aria-label="Sunshine application" style="width:140px"><button id="sunshine-pair" type="button">Pair</button><button id="sunshine-connect" class="primary" type="button">Connect</button></div>
       <p id="sunshine-status" class="muted" role="status"></p>
     </div>
+    <details id="steam-controls"><summary id="steam-summary">Steam session</summary><div class="row" style="margin-top:14px"><button id="steam-open" type="button">Open Steam Big Picture</button><button id="steam-close" type="button" disabled>Close Steam session</button></div>
+    <p id="steam-status" class="muted" role="status">Steam is ready to launch.</p>
+    </details>
     <div id="message" role="status"></div>
   </section>
-  <section class="card">
-    <h2>Now playing</h2>
-    <p id="browser-controls-note" class="muted hidden" role="note"></p>
-    <div id="artwork" class="artwork hidden"><img id="banner" class="banner hidden" alt="Channel banner"><img id="thumbnail" class="thumbnail hidden" alt="Video thumbnail"><img id="avatar" class="avatar hidden" alt="Channel profile picture"></div>
-    <div id="title">Nothing playing</div><div id="playback-state" class="muted">Idle</div>
-    <div id="playback-error" class="hidden" role="alert"></div>
-    <div class="time"><span id="position">0:00</span><span id="duration">0:00</span></div>
-    <input id="seek" type="range" min="0" max="0" value="0" disabled aria-label="Seek position">
-    <div class="row" style="margin-top:12px">
-      <button id="previous" disabled>Previous</button><button data-control="rewind">−5 sec</button>
-      <button data-control="pause">Pause</button><button data-control="resume">Play</button>
-      <button data-control="forward">+5 sec</button><button id="next" disabled>Next</button>
-    <button id="quit" class="danger" title="Closes playback and MediaBridge's LibreWolf windows">Quit</button>
-    </div>
-    <label for="volume">Volume <span id="volume-label">—</span></label>
-    <div class="row"><button data-control="volume_down" aria-label="Volume down">−</button><input id="volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume"><button data-control="volume_up" aria-label="Volume up">+</button></div>
-  </section>
-  <section class="card"><div class="row"><h2 style="margin:0;flex:1">Queue</h2><button id="autoplay-toggle" type="button">Enable autoplay</button></div><p id="autoplay-state" class="muted">Autoplay is off</p><ol id="queue"><li class="muted">Queue is empty</li></ol></section>
-  <section class="card">
+  <section id="queue-card" class="card"><div class="row"><h2 style="margin:0;flex:1">Queue</h2><button id="autoplay-toggle" type="button">Enable autoplay</button></div><p id="autoplay-state" class="muted" role="status">Autoplay is off</p><div id="autoplay-error" class="hidden" role="status"></div><button id="clear-autoplay-error" class="hidden" type="button">Dismiss Mix error</button><ol id="queue"><li class="muted">Queue is empty</li></ol></section>
+  <section id="history-card" class="card"><details><summary>History</summary><details class="help"><summary aria-label="History replay help" aria-describedby="help-11">?</summary><div id="help-11" role="note">Newest first, up to 50 items. Replaying keeps the waiting queue. For SMB provider playback, enter the matching provider reference above before replaying.</div></details>
+    <div class="row"><button id="history-select-all" type="button">Select all</button><button id="history-clear-selection" type="button">Clear selection</button><button id="history-next" type="button" disabled>Queue selected next</button><button id="history-last" type="button" disabled>Queue selected last</button><span id="history-selection-count" class="muted">0 selected</span></div>
+    <ol id="history"><li class="muted">History is empty</li></ol>
+  </details></section>
+  <section id="touchpad-card" class="card">
     <div class="row"><h2 style="margin:0;flex:1">Host touchpad</h2><button id="toggle-touchpad" type="button" aria-expanded="false" aria-controls="touchpad-controls">Show</button></div>
     <div id="touchpad-controls" class="hidden">
-      <p class="muted">Drag to move the Linux pointer. Tap or click for left click; use the buttons for right and middle click.</p>
+      <details class="help"><summary aria-label="Touchpad help" aria-describedby="help-12">?</summary><div id="help-12" role="note">Drag to move the Linux pointer. Tap or click for left click; use the buttons for right and middle click.</div></details>
       <div id="touchpad" role="application" aria-label="Remote mouse touchpad">Touch or drag here</div>
       <div class="row" style="margin-top:10px"><button data-mouse-click="left">Left click</button><button data-mouse-click="right">Right click</button><button data-mouse-click="middle">Middle click</button></div>
     </div>
   </section>
+  <section id="timer-card" class="card" aria-labelledby="close-timer-heading">
+    <h2 id="close-timer-heading">Close timer</h2><p class="muted">Closes all playback. Steam games may lose unsaved progress.</p>
+    <details class="help"><summary aria-label="Close timer help" aria-describedby="help-13">?</summary><div id="help-13" role="note">Close video/browser playback, Moonlight, and managed Steam sessions when time runs out. Works with autoplay on or off. Steam game cleanup can discard unsaved progress.</div></details>
+    <label for="close-minutes">Minutes until close</label><input id="close-minutes" type="number" min="0" step="any" inputmode="decimal" placeholder="For example: 45 or 2.5">
+    <div class="row" style="margin-top:10px"><button id="set-close-timer" type="button">Set timer</button><button id="cancel-close-timer" type="button">Cancel timer</button></div>
+    <p id="close-countdown" class="muted" role="status">No close countdown</p><p id="close-timer-error" class="item-error hidden" role="status"></p>
+  </section>
+</main>
 <script>
   const $ = id => document.getElementById(id);
+  // Independent desktop columns avoid gaps below shorter cards. Restore the
+  // reading order on phones so visual and keyboard navigation stay together.
+  if (window.matchMedia) {
+    const narrowDashboard = window.matchMedia('(max-width: 760px)');
+    const cardOrder = ['now-playing-card', 'add-media-card', 'queue-card', 'history-card', 'timer-card', 'touchpad-card'];
+    const columns = [document.createElement('div'), document.createElement('div')];
+    columns.forEach(column => { column.className = 'dashboard-column'; });
+    function arrangeDashboard() {
+      const dashboard = $('dashboard');
+      if (narrowDashboard.matches) {
+        cardOrder.forEach(id => dashboard.append($(id)));
+        columns.forEach(column => column.remove());
+      } else {
+        ['now-playing-card', 'queue-card', 'timer-card'].forEach(id => columns[0].append($(id)));
+        ['add-media-card', 'history-card', 'touchpad-card'].forEach(id => columns[1].append($(id)));
+        dashboard.append(...columns);
+      }
+    }
+    narrowDashboard.addEventListener('change', arrangeDashboard);
+    arrangeDashboard();
+  }
   const message = text => { $('message').textContent = text || ''; };
   const mode = $('mode');
   let isLinuxPlatform = false;
   let browserMonitorPlacementSupported = false;
   function setSettingsOpen(open) {
+    $('settings-drawer').inert = !open;
     document.body.classList.toggle('settings-open', open);
     $('settings-backdrop').classList.toggle('hidden', !open);
     $('toggle-settings').setAttribute('aria-expanded', String(open));
     $('settings-drawer').setAttribute('aria-hidden', String(!open));
+    if (open) window.setTimeout(() => $('close-settings').focus?.(), 250);
+    else $('toggle-settings').focus?.();
   }
   const ACCOUNT_SETUP_KEY = 'mediabridge.account-setup-dismissed.v1';
   const ACCOUNT_CHECKS_KEY = 'mediabridge.account-cookie-checks.v1';
@@ -171,6 +291,8 @@
     accountSetupDismissed = localStorage.getItem(ACCOUNT_SETUP_KEY) === 'yes';
     if (!accountSetupDismissed) localStorage.setItem(ACCOUNT_SETUP_KEY, 'yes');
   } catch (_) {}
+  // Accounts remain available in Settings without a large onboarding card.
+  accountSetupDismissed = true;
   const finishAccountSetupRow = $('finish-account-setup').parentElement;
   if (accountSetupDismissed) {
     $('account-settings-slot').append(accountSetupCard);
@@ -180,12 +302,28 @@
     try { localStorage.setItem(ACCOUNT_SETUP_KEY, 'yes'); } catch (_) {}
     finishAccountSetupRow.classList.add('hidden');
     $('account-settings-slot').append(accountSetupCard);
+    $('account-settings-group').open = true;
     setSettingsOpen(true);
   };
   $('toggle-settings').onclick = () => setSettingsOpen(!$('toggle-settings').matches('[aria-expanded="true"]'));
   $('close-settings').onclick = () => setSettingsOpen(false);
   $('settings-backdrop').onclick = () => setSettingsOpen(false);
-  document.addEventListener('keydown', event => { if (event.key === 'Escape') setSettingsOpen(false); });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape') {
+      const openHelp = [...document.querySelectorAll('.help[open]')];
+      if (openHelp.length) { openHelp.forEach(help => help.open = false); event.preventDefault(); return; }
+      if (document.body.classList.contains('settings-open')) setSettingsOpen(false);
+    }
+    if (event.key === 'Tab' && document.body.classList.contains('settings-open')) {
+      const controls = [...$('settings-drawer').querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), summary, [tabindex="0"]')].filter(element => element.getClientRects().length);
+      const first = controls[0], last = controls[controls.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && (document.activeElement === last || !$('settings-drawer').contains(document.activeElement))) { event.preventDefault(); first?.focus(); }
+    }
+  });
+  document.addEventListener('click', event => {
+    document.querySelectorAll('.help[open]').forEach(help => { if (!help.contains(event.target)) help.open = false; });
+  });
   $('toggle-touchpad').onclick = () => {
     const controls = $('touchpad-controls'), expanded = controls.classList.toggle('hidden') === false;
     $('toggle-touchpad').textContent = expanded ? 'Hide' : 'Show';
@@ -290,13 +428,17 @@
     finally { button.disabled = false; }
   };
   loadRemoteOrigins();
+  let savedTrackPreferences = {};
   function applyPreferences(preferences) {
+    savedTrackPreferences = preferences.track_preferences || {};
     const quality = ['480', '720', '1080', '1440', '2160'].includes(String(preferences.default_quality)) ? String(preferences.default_quality) : '720';
     $('default-screen').value = preferences.default_screen ?? '';
     $('default-quality').value = quality;
     $('default-video-codec').value = ['h264', 'vp9', 'auto'].includes(preferences.default_video_codec) ? preferences.default_video_codec : 'h264';
     $('default-subtitles').checked = !!preferences.subtitles;
-    $('preferred-language').value = preferences.preferred_language ?? '';
+    $('preferred-language').value = savedTrackPreferences.subtitle?.language ?? preferences.preferred_language ?? '';
+    $('default-multiple-audio').checked = !!savedTrackPreferences.load_multiple_audio_tracks;
+    $('multiple-audio').checked = !!savedTrackPreferences.load_multiple_audio_tracks;
     const cookieBrowser = preferences.cookies_browser || 'auto';
     $('cookies-browser').value = isLinuxPlatform
       ? (cookieBrowser === 'off' ? 'off' : 'librewolf')
@@ -315,6 +457,7 @@
   async function configurePlatform() {
     try {
       const response = await fetch('/platform', {cache:'no-store'}), platform = await response.json();
+      renderFlatpakAccess(platform);
       if (!['linux', 'windows'].includes(platform.os)) {
         $('cookies-browser').querySelector('option[value="librewolf"]')?.remove();
         $('browser').querySelector('option[value="librewolf"]')?.remove();
@@ -329,15 +472,30 @@
       $('cookies-profile').disabled = true;
       $('cookies-profile').placeholder = 'Uses the managed persistent profile';
       $('cookies-profile').value = '';
-      const cookieHelp = $('cookies-profile').nextElementSibling;
-      if (cookieHelp?.classList.contains('muted')) cookieHelp.textContent = 'Uses the persistent MediaBridge LibreWolf profile with uBlock Origin. Sign in to supported sites in this browser; cookies are kept when it closes.';
+      const cookieHelp = $('cookies-profile').nextElementSibling?.querySelector('[role=note]');
+      if (cookieHelp) cookieHelp.textContent = 'Uses the persistent MediaBridge LibreWolf profile with uBlock Origin. Sign in to supported sites in this browser; cookies are kept when it closes.';
       const browser = $('browser');
       browser.replaceChildren(new Option('MediaBridge LibreWolf', 'librewolf'));
       browser.value = 'librewolf';
-      $('browser-controls-note').textContent = 'Managed LibreWolf opens websites fullscreen and reports their page title. It attempts embedded video fullscreen once; playback controls work when the page exposes a controllable video.';
+      $('browser-controls-text').textContent = 'Managed LibreWolf opens websites fullscreen and reports their page title. It attempts embedded video fullscreen once; playback controls work when the page exposes a controllable video.';
       $('browser-controls-note').classList.remove('hidden');
     } catch (_) {}
   }
+  function renderFlatpakAccess(platform) {
+    $('flatpak-host-settings').classList.toggle('hidden', !platform.flatpak);
+    $('flatpak-host-status').textContent = platform.steam_host_access_configured === true
+      ? 'Host execution permission is configured for this session. Steam controls still require the host tools.'
+      : platform.steam_host_access_configured === false
+        ? 'Host execution permission is not configured for this session.'
+        : 'Host execution permission could not be determined.';
+  }
+  $('flatpak-host-recheck').onclick = async () => {
+    try {
+      const response = await fetch('/platform', {cache:'no-store'});
+      if (!response.ok) throw new Error('Could not check access');
+      renderFlatpakAccess(await response.json());
+    } catch (error) { $('flatpak-host-status').textContent = error.message; }
+  };
   $('save-playback-preferences').onclick = async () => {
     const rawScreen = $('default-screen').value.trim();
     const language = $('preferred-language').value.trim();
@@ -347,9 +505,11 @@
       default_video_codec: $('default-video-codec').value,
       subtitles: $('default-subtitles').checked,
       preferred_language: language || null,
+      track_preferences: {...savedTrackPreferences, load_multiple_audio_tracks:$('default-multiple-audio').checked},
       cookies_browser: $('cookies-browser').value,
       cookies_profile: $('cookies-profile').value.trim() || null,
     };
+    if (savedTrackPreferences.subtitle?.language && language !== savedTrackPreferences.subtitle.language) preferences.track_preferences.subtitle = null;
     if (preferences.default_screen !== null && (!Number.isInteger(preferences.default_screen) || preferences.default_screen < 0 || preferences.default_screen > 32)) {
       $('preferences-status').textContent = 'Monitor index must be a whole number from 0 to 32.'; return;
     }
@@ -534,16 +694,16 @@
     } catch (error) { $('server-port-status').textContent = error.message; button.disabled = false; }
   };
   configurePlatform().then(loadPreferences);
-  function itemFromForm() {
-    const url = cleanLink($('url').value);
+  function itemFromForm(input = $('url').value) {
+    const url = cleanLink(input);
     const smb = /^smb:\/\//i.test(url);
     if (!url || (!/^https?:\/\//i.test(url) && !smb)) throw new Error('Paste a complete http(s) website or media URL, or an smb:// share path.');
     if (smb && mode.value !== 'local') throw new Error('SMB shares require Direct player (mpv) mode.');
     const item = {url};
+    applyAttribution(item);
+    applySmbReference(item);
     if ($('autoplay-after-queue').checked) {
       item.autoplay = true;
-      const autoplayMinutes = Number($('autoplay-duration').value);
-      if (autoplayMinutes) item.autoplay_minutes = autoplayMinutes;
     }
     item.subtitles = $('subtitles').checked;
     if ($('screen').value !== '' && (mode.value === 'local' || $('browser').value.toLowerCase().includes('librewolf'))) {
@@ -553,8 +713,22 @@
     }
     if (mode.value === 'local') {
       item.local = true;
+      item.load_multiple_audio_tracks = $('multiple-audio').checked;
       if ($('quality').value !== 'best') item.quality = $('quality').value;
     } else if ($('browser').value) item.browser = $('browser').value;
+    return item;
+  }
+  function applyAttribution(item) {
+    const user = $('submitter-id').value.trim();
+    if (user) item.queued_by_user_id = user;
+    return item;
+  }
+  function applySmbReference(item) {
+    if (/^smb:\/\//i.test(item.url)) {
+      const reference = $('smb-share-id').value.trim();
+      if (reference && !/^[a-f0-9]{24}$/i.test(reference)) throw new Error('SMB provider reference must contain 24 hexadecimal characters.');
+      if (reference) item.smb_share_id = reference;
+    }
     return item;
   }
   let previewCache = null;
@@ -573,11 +747,13 @@
       message(`Resolved: ${info.title || info.url}${info.uploader ? ' — ' + info.uploader : ''}${info.is_live ? ' (live)' : ''}${info.extractor ? ' · ' + info.extractor : ''}`);
     } catch (error) { message('Could not resolve link: ' + error.message); }
   };
-  async function add(path) {
+  async function add(path, atEnd = false) {
     try {
       const item = itemFromForm();
       const originalUrl = item.url;
       const isYoutubePlaylist = isYoutubePlaylistUrl(originalUrl);
+      if (isYoutubePlaylist && (atEnd || ['/play_preserve_queue', '/play_interrupt'].includes(path))) throw new Error('Use an individual video link for this action; playlist actions are Play now, Play next, or Play last.');
+      if (atEnd) item.at_end = true;
       const playlistPath = isYoutubePlaylist && path === '/play' ? '/play_playlist' : isYoutubePlaylist && path === '/queue' ? '/queue_playlist' : isYoutubePlaylist && path === '/queue_next' ? '/queue_playlist_next' : null;
       const cachedInfo = previewCache?.url === originalUrl ? previewCache : null;
       if (cachedInfo) {
@@ -587,24 +763,54 @@
         item.thumbnail_url = cachedInfo.thumbnail_url || null;
         item.channel_avatar_url = cachedInfo.channel_avatar_url || null;
         item.channel_banner_url = cachedInfo.channel_banner_url || null;
+        if (Number.isFinite(cachedInfo.duration_seconds) && cachedInfo.duration_seconds > 0) item.duration_seconds = cachedInfo.duration_seconds;
       }
-      message(/^smb:\/\//i.test(item.url) ? 'Adding SMB media…' : path === '/play' ? 'Starting playback…' : 'Adding to queue…');
+      message(/^smb:\/\//i.test(item.url) ? 'Adding SMB media…' : path.startsWith('/play') ? 'Starting playback…' : 'Adding to queue…');
       const result = await api(playlistPath || path, item);
       if (!playlistPath && item.local && !cachedInfo && !/^smb:\/\//i.test(originalUrl)) {
         api('/resolve_async', {url:originalUrl}).catch(() => {});
       }
       $('url').value = ''; previewCache = null;
-      message(playlistPath === '/play_playlist' ? `Playing the first video; added ${Math.max(0, result.added - 1)} more to the queue.` : playlistPath ? `Added ${result.added} playlist videos to the queue.` : path === '/play' ? 'Playback request accepted.' : 'Added to queue.'); await refresh();
+      message(playlistPath === '/play_playlist' ? `Playing the first video; added ${Math.max(0, result.added - 1)} more to the queue.` : playlistPath ? `Added ${result.added} playlist videos to the queue.` : path === '/play_interrupt' ? 'Playback accepted; the interrupted video is queued next at its saved position.' : path.startsWith('/play') ? 'Playback request accepted.' : 'Added to queue.'); await refresh();
     } catch (error) { message(error.message); }
   }
   $('play-now').onclick = () => add('/play');
   $('play-next').onclick = () => add('/queue_next');
   $('play-last').onclick = () => add('/queue');
+  $('play-preserve').onclick = () => add('/play_preserve_queue');
+  $('play-interrupt').onclick = () => add('/play_interrupt');
+  $('append-tail').onclick = () => add('/queue', true);
+  async function submitBatch(batchMode) {
+    const buttons = [$('batch-next'), $('batch-last')];
+    try {
+      const urls = $('batch-urls').value.split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+      if (!urls.length || urls.length > 200) throw new Error('Enter 1 to 200 video URLs, one per line.');
+      const items = urls.map(url => { const item = itemFromForm(url); delete item.autoplay; delete item.autoplay_minutes; return item; });
+      buttons.forEach(button => button.disabled = true);
+      const result = await api('/queue_batch', {mode:batchMode, items});
+      $('batch-urls').value = ''; message(`Accepted ${result.added} batch items.`); await refresh();
+    } catch (error) { message(error.message); }
+    finally { buttons.forEach(button => button.disabled = false); }
+  }
+  $('batch-next').onclick = () => submitBatch('next');
+  $('batch-last').onclick = () => submitBatch('last');
+  $('clear-autoplay-error').onclick = async () => {
+    try { await api('/autoplay/error/clear'); await refresh(); } catch (error) { message(error.message); }
+  };
   $('autoplay-toggle').onclick = async () => {
     const enabled = $('autoplay-toggle').dataset.enabled !== 'true';
-    const duration = Number($('autoplay-duration').value);
-    try { await api('/autoplay', {enabled, duration_minutes: enabled && duration ? duration : null}); await refresh(); }
+    try { await api('/autoplay', {enabled}); await refresh(); }
     catch (error) { message(error.message); }
+  };
+  $('set-close-timer').onclick = async () => {
+    try {
+      const minutes = Number($('close-minutes').value);
+      if (!Number.isFinite(minutes) || minutes <= 0) throw new Error('Enter a positive number of minutes. Decimals are allowed.');
+      await api('/timer', {minutes}); message('Close countdown started.'); await refresh();
+    } catch (error) { message(error.message); }
+  };
+  $('cancel-close-timer').onclick = async () => {
+    try { await api('/timer', {minutes:null}); await refresh(); } catch (error) { message(error.message); }
   };
   function time(value) {
     if (!Number.isFinite(value) || value < 0) return '0:00';
@@ -626,7 +832,9 @@
   });
   $('next').onclick = async () => { try { await api('/next'); await refresh(); } catch (error) { message(error.message); } };
   $('previous').onclick = async () => { try { await api('/previous'); await refresh(); } catch (error) { message(error.message); } };
-  $('quit').onclick = async () => { try { await api('/close'); message('Playback closed.'); await refresh(); } catch (error) { message(error.message); } };
+  $('quit').onclick = async () => { try { await api('/close'); message('Close requested.'); await refresh(); } catch (error) { message(error.message); } };
+  $('steam-open').onclick = async () => { try { await api('/steam/bigpicture'); await refresh(); } catch (error) { message(error.message); } };
+  $('steam-close').onclick = async () => { try { await api('/steam/close'); await refresh(); } catch (error) { message(error.message); } };
   const touchpad = $('touchpad');
   let lastPointer = null, mouseRequests = Promise.resolve(), pendingDx = 0, pendingDy = 0, moveTimer = null;
   function sendMouse(body) { mouseRequests = mouseRequests.then(() => api('/mouse', body)).catch(error => message(error.message)); }
@@ -663,19 +871,150 @@
       element.src = parsed.href; element.classList.remove('hidden'); return true;
     } catch (_) { element.removeAttribute('src'); element.classList.add('hidden'); return false; }
   }
+  let historyItems = [], historyOrder = '', renderedHistory = '', renderedQueue = '';
+  const historySelection = new Set();
+  function describeItem(item) {
+    const duration = Number.isFinite(item.duration_seconds) && item.duration_seconds > 0 ? time(item.duration_seconds) : 'Duration unknown';
+    return [item.autoplay_generated ? 'YouTube Mix' : null, item.uploader, duration,
+      item.queued_by_user_id ? `Submitted by ${item.queued_by_user_id}` : null,
+      item.start_position_seconds != null ? `Resume at ${time(item.start_position_seconds)}` : null,
+      item.local ? 'mpv' : 'browser', item.quality && item.quality !== 'best' ? `${item.quality}p max` : null,
+      item.screen != null ? `display ${item.screen}` : null, item.url].filter(Boolean).join(' · ');
+  }
+  function appendMetadataError(details, item) {
+    if (!item.metadata_error) return;
+    const error = document.createElement('div'); error.className = 'item-error'; error.textContent = item.metadata_error; details.append(error);
+  }
+  function appendSourceHelp(parent, url) {
+    if (!url) return;
+    const help = document.createElement('details'), trigger = document.createElement('summary'), text = document.createElement('div');
+    help.className = 'help'; trigger.textContent = '?'; trigger.setAttribute('aria-label', 'Media source URL');
+    text.setAttribute('role', 'note'); text.textContent = url;
+    help.append(trigger, text); parent.append(help);
+  }
+  function replayItem(item) {
+    const copy = {};
+    for (const key of ['url', 'title', 'uploader', 'thumbnail_url', 'channel_avatar_url', 'channel_banner_url', 'duration_seconds', 'local', 'browser', 'subtitles', 'load_multiple_audio_tracks', 'quality', 'screen']) {
+      if (item[key] != null) copy[key] = item[key];
+    }
+    return applySmbReference(applyAttribution(copy));
+  }
+  function updateHistorySelection() {
+    $('history-selection-count').textContent = `${historySelection.size} selected`;
+    $('history-next').disabled = $('history-last').disabled = historySelection.size === 0;
+  }
+  async function replayHistory(item, path) {
+    try { await api(path, replayItem(item)); message('History replay accepted.'); await refresh(); }
+    catch (error) { message(error.message); }
+  }
+  function renderHistory() {
+    const signature = JSON.stringify(historyItems);
+    if (signature === renderedHistory) return;
+    renderedHistory = signature;
+    const list = $('history'); list.replaceChildren();
+    if (!historyItems.length) { const empty = document.createElement('li'); empty.className = 'muted'; empty.textContent = 'History is empty'; list.append(empty); }
+    historyItems.forEach((item, index) => {
+      const li = document.createElement('li'), label = document.createElement('label'), check = document.createElement('input');
+      check.type = 'checkbox'; check.checked = historySelection.has(index); check.dataset.historyIndex = String(index);
+      check.onchange = () => { if (check.checked) historySelection.add(index); else historySelection.delete(index); updateHistorySelection(); };
+      label.append(check, document.createTextNode(' ' + (item.title || item.url))); li.append(label);
+      appendSourceHelp(li, item.url);
+      const details = document.createElement('div'); details.className = 'muted'; details.textContent = describeItem(item).replace(' · ' + item.url, ''); details.title = item.url; appendMetadataError(details, item); li.append(details);
+      const actions = document.createElement('div'); actions.className = 'row';
+      for (const [text, path] of [['Play · keep queue', '/play_preserve_queue'], ['Interrupt & resume', '/play_interrupt'], ['Queue next', '/queue_next'], ['Queue last', '/queue']]) {
+        const button = document.createElement('button'); button.type = 'button'; button.textContent = text;
+        button.onclick = () => {
+          if (path !== '/queue') return replayHistory(item, path);
+          (async () => { try { await api('/queue', {...replayItem(item), at_end:true}); await refresh(); } catch (error) { message(error.message); } })();
+        };
+        actions.append(button);
+      }
+      li.append(actions); list.append(li);
+    });
+    updateHistorySelection();
+  }
+  $('history-select-all').onclick = () => { historyItems.forEach((_, index) => historySelection.add(index)); renderedHistory = ''; renderHistory(); };
+  $('history-clear-selection').onclick = () => { historySelection.clear(); renderedHistory = ''; renderHistory(); };
+  async function queueHistorySelection(batchMode) {
+    try {
+      const items = historyItems.filter((_, index) => historySelection.has(index)).map(replayItem);
+      if (!items.length) return;
+      const result = await api('/queue_batch', {mode:batchMode, items});
+      historySelection.clear(); renderedHistory = ''; message(`Accepted ${result.added} history items in displayed order.`); await refresh();
+    } catch (error) { message(error.message); }
+  }
+  $('history-next').onclick = () => queueHistorySelection('next');
+  $('history-last').onclick = () => queueHistorySelection('last');
+  let trackEpoch = null, trackSignature = '';
+  function renderTracks(state) {
+    $('track-controls').classList.toggle('hidden', !state.tracks_available);
+    trackEpoch = state.playback_epoch;
+    const signature = JSON.stringify([trackEpoch, state.subtitle_tracks, state.audio_tracks]);
+    if (signature === trackSignature) return;
+    trackSignature = signature;
+    for (const [id, tracks] of [['subtitle-track', state.subtitle_tracks || []], ['audio-track', state.audio_tracks || []]]) {
+      const select = $(id); select.replaceChildren();
+      const off = document.createElement('option'); off.value = 'off'; off.textContent = 'Off'; select.append(off);
+      for (const track of tracks) {
+        const option = document.createElement('option'); option.value = String(track.id);
+        option.textContent = [`#${track.id}`, track.language || 'Unknown language', track.title, track.codec, track.channels ? `${track.channels} channels` : null, track.forced ? 'Forced' : null, track.external ? 'External' : null].filter(Boolean).join(' · ');
+        select.append(option);
+      }
+      select.value = String(tracks.find(track => track.selected)?.id ?? 'off');
+    }
+  }
+  for (const [id, path] of [['subtitle-track','/subtitles/select'],['audio-track','/audio/select']]) {
+    $(id).onchange = async () => {
+      const select = $(id); select.disabled = true;
+      try {
+        const remember = $('remember-tracks').checked;
+        const result = await api(path, {id:select.value === 'off' ? null : Number(select.value), remember, playback_epoch:trackEpoch});
+        $('track-status').textContent = result.preference_error ? `Track changed, but default could not be saved: ${result.preference_error}` : result.preference_saved ? 'Track changed and saved as the default.' : 'Track changed for this video only.';
+        if (result.preference_saved) await loadPreferences();
+        trackSignature = ''; await refresh();
+      } catch (error) { $('track-status').textContent = error.message; trackSignature = ''; await refresh(); }
+      finally { select.disabled = false; }
+    };
+  }
   async function refresh() {
     try {
       const response = await fetch('/status', {cache:'no-store'});
       if (!response.ok) throw new Error('status unavailable');
       const state = await response.json();
+      renderTracks(state);
+      const steam = state.steam || {};
+      $('steam-summary').textContent = steam.active ? `Steam · ${steam.phase}` : 'Steam session';
+      if (steam.error) $('steam-controls').open = true;
+      $('steam-open').disabled = !!steam.active;
+      $('steam-close').disabled = !steam.active || steam.phase === 'closing';
+      $('steam-status').textContent = steam.error || (steam.active
+        ? `Steam${steam.games?.length ? ' — ' + steam.games.map(game => game.name || game.app_id).join(', ') : ''} · ${steam.phase}`
+        : 'Steam is ready to launch.');
       $('connection').textContent = 'Connected';
       $('title').textContent = state.title || state.current || 'Nothing playing';
       $('playback-state').textContent = state.playback_state || 'idle';
+      const isPlaying = state.playback_state === 'playing';
+      $('play-toggle').disabled = !state.current;
+      $('play-toggle').dataset.control = isPlaying ? 'pause' : state.playback_state === 'paused' ? 'resume' : 'play_pause';
+      $('play-toggle').setAttribute('aria-label', isPlaying ? 'Pause' : 'Play');
+      $('play-toggle').title = isPlaying ? 'Pause' : 'Play';
+      $('play-icon').classList.toggle('hidden', isPlaying);
+      $('pause-icon').classList.toggle('hidden', !isPlaying);
+      $('hardware-decoder').textContent = state.hardware_decoder ? `Video decoder: ${state.hardware_decoder}` : '';
+      $('browser-controls-note').classList.toggle('hidden', Boolean(state.hardware_decoder) || !state.current);
       $('autoplay-toggle').dataset.enabled = state.autoplay_enabled ? 'true' : 'false';
       $('autoplay-toggle').textContent = state.autoplay_enabled ? 'Disable autoplay' : 'Enable autoplay';
       $('autoplay-state').textContent = state.autoplay_enabled
-        ? `Autoplay is on${state.autoplay_until_epoch_ms ? ` until ${new Date(state.autoplay_until_epoch_ms).toLocaleTimeString()}` : ' until turned off'}. YouTube Mix videos are fetched in the background and placed after the explicit queue.`
+        ? `${state.autoplay_loading ? 'Loading Mix… ' : ''}${state.autoplay_status || 'Autoplay is on'}`
         : 'Autoplay is off';
+      const remaining = state.close_remaining_seconds;
+      $('close-countdown').textContent = Number.isFinite(remaining) ? `Closing all playback in ${time(Math.ceil(remaining))}` : 'No close countdown';
+      $('cancel-close-timer').disabled = !Number.isFinite(remaining);
+      $('close-timer-error').textContent = state.close_timer_error || '';
+      $('close-timer-error').classList.toggle('hidden', !state.close_timer_error);
+      $('autoplay-error').textContent = state.autoplay_error || '';
+      $('autoplay-error').classList.toggle('hidden', !state.autoplay_error);
+      $('clear-autoplay-error').classList.toggle('hidden', !state.autoplay_error);
       $('playback-error').textContent = state.playback_error || '';
       $('playback-error').classList.toggle('hidden', !state.playback_error);
       const hasBanner = setImage($('banner'), state.channel_banner_url);
@@ -690,19 +1029,29 @@
       else $('volume-label').textContent = '—';
       $('volume').disabled = !Number.isFinite(state.volume);
       $('next').disabled = !state.queued?.length; $('previous').disabled = !state.previous_available;
+      $('play-interrupt').disabled = Boolean(state.current && !state.can_seek);
+      historyItems = state.history_items || [];
+      const order = JSON.stringify(historyItems.map(item => item.url));
+      if (order !== historyOrder) { historySelection.clear(); historyOrder = order; }
+      renderHistory();
+      const queueSignature = JSON.stringify(state.queue_items || state.queued || []);
+      if (queueSignature !== renderedQueue) {
+      renderedQueue = queueSignature;
       const list = $('queue'); list.replaceChildren();
       if (!state.queued?.length) { const li = document.createElement('li'); li.className = 'muted'; li.textContent = 'Queue is empty'; list.append(li); }
       else (state.queue_items || state.queued.map(url => ({url}))).forEach((item, index, items) => {
         const li = document.createElement('li'), details = document.createElement('div');
         if (item.thumbnail_url) { const image = document.createElement('img'); image.className = 'queue-art'; image.alt = ''; setImage(image, item.thumbnail_url); li.append(image); }
         const name = document.createElement('strong'); name.textContent = item.title || item.url; details.append(name);
+        appendSourceHelp(details, item.url);
         const sub = document.createElement('div'); sub.className = 'muted';
-        sub.textContent = [item.autoplay_generated ? 'YouTube Mix' : null, item.uploader, item.local ? 'mpv' : 'browser', item.quality && item.quality !== 'best' ? `${item.quality}p max` : null, item.screen !== null && item.screen !== undefined ? `display ${item.screen}` : null, item.url].filter(Boolean).join(' · ');
+        sub.textContent = describeItem(item).replace(' · ' + item.url, ''); sub.title = item.url;
+        appendMetadataError(details, item);
         details.append(sub); li.append(details);
         const actions = document.createElement('div'); actions.className = 'row'; actions.style.marginTop = '5px';
         const addButton = (label, path, body, disabled) => {
           const button = document.createElement('button'); button.textContent = label; button.disabled = !!disabled;
-          button.onclick = async () => { try { await api(path, body); await refresh(); } catch (error) { message(error.message); } };
+          button.onclick = async () => { try { await api(path, path === '/queue/promote' ? applyAttribution({...body}) : body); await refresh(); } catch (error) { message(error.message); } };
           actions.append(button);
         };
         addButton('Play now', '/queue/play', {index}, false);
@@ -712,6 +1061,7 @@
         addButton('Delete', '/queue/remove', {index}, false);
         li.append(actions); list.append(li);
       });
+      }
     } catch (_) { $('connection').textContent = 'Disconnected'; }
   }
   $('seek').addEventListener('input', () => { lastSeekSent = Date.now(); $('position').textContent = time(Number($('seek').value)); });
