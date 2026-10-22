@@ -55,6 +55,12 @@ cat > "$fixture/bin/flatpak" <<'EOF'
 set -eu
 printf 'flatpak %s\n' "$*" >> "$FLATPAK_TEST_LOG"
 case "$1" in
+  --gl-drivers) printf '%s\n' "${FLATPAK_TEST_GL_DRIVERS:-default}" ;;
+  kill) exit 1 ;; # First install: no running instance must not prevent installation.
+  ps)
+    if [[ "${FLATPAK_TEST_STILL_RUNNING:-0}" == 1 ]]; then
+      echo io.github.murasaki_dev.MediaBridge
+    fi ;;
   build-finish)
     test -f "$2/metadata"
     test -f "$2/files/share/applications/io.github.murasaki_dev.MediaBridge.desktop"
@@ -64,6 +70,9 @@ case "$1" in
     if [[ "$2" == --runtime ]]; then
       test -d "$4/files"
       test -f "$4/metadata"
+      grep -q '^\[Extension org.freedesktop.Platform.GL\]' "$4/metadata"
+      grep -q '^version=1.4$' "$4/metadata"
+      test -d "$4/usr/lib64/GL"
       test -d "$4/usr/bin"
       test -w "$4/usr/bin"
       test "$(stat -c %u "$4/usr/bin")" == "$(id -u)"
@@ -75,11 +84,17 @@ case "$1" in
     if [[ "$1" == --runtime ]]; then shift; fi
     touch "$2" ;;
   install)
+    grep -q '^flatpak kill io.github.murasaki_dev.MediaBridge$' "$FLATPAK_TEST_LOG"
+    grep -q '^flatpak ps --columns=application$' "$FLATPAK_TEST_LOG"
     [[ " $* " == *' --noninteractive '* ]]
     [[ " $* " == *' --assumeyes '* ]]
-    test -f "${@: -1}" ;;
+    if [[ " $* " == *' --bundle '* ]]; then
+      test -f "${@: -1}"
+    else
+      [[ "${@: -1}" == org.freedesktop.Platform.GL.nvidia-*//1.4 ]]
+    fi ;;
   run)
-    test "$(grep -c '^flatpak install' "$FLATPAK_TEST_LOG")" == 2
+    test "$(grep -c '^flatpak install' "$FLATPAK_TEST_LOG")" -ge 2
     test ! -t 0
     ;;
 esac
@@ -92,6 +107,7 @@ test -f "$fixture/source with spaces/dist/flatpak/start-flatpak.sh"
 test "$(grep -c '^flatpak install' "$FLATPAK_TEST_LOG")" == 2
 test "$(grep -c '^setsid --fork flatpak run io.github.murasaki_dev.MediaBridge' "$FLATPAK_TEST_LOG")" == 1
 test "$(grep -c '^flatpak run io.github.murasaki_dev.MediaBridge' "$FLATPAK_TEST_LOG")" == 1
+! grep -q '^flatpak remote-add' "$FLATPAK_TEST_LOG"
 test "$(grep -c '^podman rm --force fixture-container' "$FLATPAK_TEST_LOG")" == 1
 export FLATPAK_TEST_FAIL=1
 if PATH="$fixture/bin:$PATH" bash "$fixture/source with spaces/build-flatpak.sh"; then
@@ -102,4 +118,13 @@ fi
 test "$(grep -c '^podman rm --force fixture-container' "$FLATPAK_TEST_LOG")" == 2
 test "$(grep -c '^flatpak build-export' "$FLATPAK_TEST_LOG")" == 2
 test -z "$(find "$fixture/source with spaces/dist/flatpak" -maxdepth 1 -name 'work.*' -print -quit)"
+export FLATPAK_TEST_GL_DRIVERS='default;nvidia-580-126-18'
+PATH="$fixture/bin:$PATH" bash "$fixture/source with spaces/dist/flatpak/install-flatpak.sh"
+grep -q '^flatpak remote-add --user --if-not-exists flathub ' "$FLATPAK_TEST_LOG"
+grep -q 'org.freedesktop.Platform.GL.nvidia-580-126-18//1.4' "$FLATPAK_TEST_LOG"
+installs_before="$(grep -c '^flatpak install' "$FLATPAK_TEST_LOG")"
+if FLATPAK_TEST_STILL_RUNNING=1 PATH="$fixture/bin:$PATH" bash "$fixture/source with spaces/dist/flatpak/install-flatpak.sh"; then
+  echo 'Installer continued with an old instance still running' >&2; exit 1
+fi
+test "$(grep -c '^flatpak install' "$FLATPAK_TEST_LOG")" == "$installs_before"
 echo 'Flatpak build orchestration: bundles, runtime-first install, spaces, default permissions and cleanup passed.'

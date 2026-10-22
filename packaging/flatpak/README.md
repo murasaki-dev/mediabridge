@@ -47,9 +47,33 @@ controls also require host Python 3 and libX11. Playback works without this
 permission. Steam and Sunshine are installed separately on their respective hosts.
 
 Steam Deck installation has been tested by the user; Gaming Mode startup remains
-unverified. Wayland restrictions still apply. NVIDIA integration and restricted
-codecs need further testing. External SMB providers are not bundled. The package
-does not change firewall rules; allow your configured TCP port for LAN access.
+unverified. Wayland restrictions still apply. The runtime includes AMD Mesa
+Freeworld VA-API, modern/legacy Intel media drivers, the NVIDIA VA-API backend,
+and RPM Fusion's full FFmpeg libraries
+and verifies common video/audio decoders, including HEVC, AC-3 and DTS. Decoder
+inventories are saved under `/app/share/mediabridge/`. External SMB providers are
+not bundled. The package does not change firewall rules; allow your configured
+TCP port for LAN access.
+
+### Hardware decoding
+
+mpv uses automatic hardware decoding with software fallback. GPU selection is
+not forced. On NVIDIA hosts, the installer adds Flathub if needed and installs
+the graphics extension matching the host's NVIDIA driver. This needs internet
+unless the matching extension is already installed. Host kernel drivers are
+still required and are not bundled or changed. After a host NVIDIA driver
+upgrade, run `flatpak update --user` or rerun `install-flatpak.sh`, then restart
+MediaBridge. Graphics support still needs testing on each target GPU.
+
+Check driver visibility and supported VA-API profiles after installation:
+
+```sh
+flatpak run --command=mediabridge-check-gpu io.github.murasaki_dev.MediaBridge
+```
+
+The build checks driver files and linked libraries without needing a GPU.
+This diagnostic checks the installed sandbox; the dashboard's decoder indicator
+during actual playback confirms whether mpv is using hardware decoding.
 
 ## Build on Fedora
 

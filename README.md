@@ -88,6 +88,7 @@ MediaBridge brings together these projects; thanks to their maintainers and cont
 | [LibreWolf](https://librewolf.net/), built on [Firefox](https://www.mozilla.org/firefox/), with [uBlock Origin](https://github.com/gorhill/uBlock) | Managed browser playback and persistent sign-in profile. |
 | [Moonlight Qt](https://github.com/moonlight-stream/moonlight-qt) and [Sunshine](https://github.com/LizardByte/Sunshine) | Game and desktop streaming; Sunshine runs separately on the streaming host. |
 | [Flatpak](https://flatpak.org/) and [Fedora](https://fedoraproject.org/) | Recommended Linux package and its isolated runtime. |
+| [RPM Fusion](https://rpmfusion.org/) | Additional FFmpeg codec support inside the Flatpak runtime. |
 | [Distrobox](https://distrobox.it/) and [Podman](https://podman.io/) | Native runtime on SteamOS/Bazzite and container-based Flatpak builds. |
 | [Rust](https://www.rust-lang.org/), [GTK](https://www.gtk.org/), and [tray-icon](https://github.com/tauri-apps/tray-icon) | Application, desktop, and tray foundations. |
 
