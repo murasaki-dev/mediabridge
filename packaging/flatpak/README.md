@@ -4,6 +4,8 @@ Flatpak is the recommended Linux installation, including SteamOS and Bazzite.
 This package includes its own Fedora runtime and playback tools. It is distributed
 as local bundles, not through Flathub; package updates are installed manually.
 
+Desktop mouse control works directly on X11. On Wayland, use **Settings → Desktop mouse → Enable desktop control** and approve the request on the server computer. A Remote Desktop portal backend is required (desktop support varies); from v1.2.1 your choice and portal restore token are saved across restarts and updates. The desktop may ask again if persistence is unsupported or permission was revoked. Disconnect clears the saved choice. Relative movement and clicks work across the desktop, without active playback. Absolute positioning is available on X11 only.
+
 ## Install and launch
 
 Download these four files from [Releases](https://github.com/murasaki-dev/mediabridge/releases)
@@ -103,6 +105,15 @@ larger than a shared-runtime package.
 
 ## Logs and removal
 
+DIAL discovery is enabled by default and can be changed in dashboard Settings.
+Allow UDP `1900` plus the configured server TCP port through Fedora's host
+firewall for discovery from another device. The installer does not change host
+firewall rules. DIAL is experimental app discovery/launch support, not a full
+Chromecast receiver; third-party app pairing and control are not guaranteed.
+From v1.2.0, YouTube pairing uses a built-in Lounge receiver and routes videos to
+yt-dlp/mpv. It needs outbound HTTPS to YouTube. DIAL settings show receiver status
+and redacted errors; real Android pairing/playback verification is still pending.
+
 Detached-launch logs default to `~/.local/state/mediabridge-flatpak/launcher.log`.
 App settings, profiles and logs live under
 `~/.var/app/io.github.murasaki_dev.MediaBridge/`. For foreground diagnostics, run
@@ -119,3 +130,5 @@ flatpak uninstall --user io.github.murasaki_dev.MediaBridge.Platform
 Add `--delete-data` to app removal to erase settings and sign-ins. If enabled,
 clear the host-access override with
 `flatpak override --user --reset io.github.murasaki_dev.MediaBridge`.
+
+Bundled Moonlight uses Qt xcb on X11 or XWayland. The package grants X11 alongside Wayland and selects the bundled backend explicitly; an XWayland display is required on Wayland desktops. Moonlight startup output is retained in the launcher log and nonzero stream exits appear as playback errors.

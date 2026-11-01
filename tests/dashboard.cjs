@@ -43,6 +43,22 @@ const context = vm.createContext({document:{getElementById:node, createElement:(
   }});
 vm.runInContext(html.match(/<script>([\s\S]*?)<\/script>/)[1], context);
 async function run() {
+  vm.runInContext('renderDesktopMouse({supported:true,backend:"portal",pending:true,enabled:false})', context);
+  assert.equal(node('enable-desktop-mouse').disabled, true);
+  assert.match(node('desktop-mouse-status').textContent, /Approve/);
+  vm.runInContext('renderDesktopMouse({supported:true,backend:"portal",pending:false,enabled:true})', context);
+  assert.equal(node('disable-desktop-mouse').disabled, false);
+  await node('enable-desktop-mouse').onclick();
+  assert(posts.some(post=>post.path==='/settings/mouse' && post.body.enabled===true));
+  node('repeat-video').checked=true;
+  await node('repeat-video').onchange();
+  assert(posts.some(post=>post.path==='/repeat' && post.body.enabled===true));
+  node('repeat-playlist').checked=true;
+  await node('repeat-playlist').onchange();
+  assert(posts.some(post=>post.path==='/repeat_playlist' && post.body.enabled===true));
+  node('dial-enabled').checked=true; node('dial-name').value='Living Room';
+  await node('save-dial').onclick();
+  assert(posts.some(post=>post.path==='/settings/dial' && post.body.friendly_name==='Living Room'));
   vm.runInContext('renderAutostart({supported:true,enabled:true,pending:false})',context);
   assert.equal(node('autostart-enabled').checked,true);
   vm.runInContext('renderAutostart({supported:true,enabled:false,requested:true,pending:true})',context);

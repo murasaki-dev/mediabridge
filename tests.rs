@@ -1,6 +1,378 @@
 use super::*;
 
 #[test]
+fn explicit_receiver_stop_clears_playback_queue_and_autoplay() {
+    let mut state=State::default();
+    state.current=Some(receiver_item("abcdefghijk",0.0));
+    state.queue.push_back(receiver_item("lmnopqrstuv",0.0));
+    state.youtube_receiver_playlist=vec!["abcdefghijk".into(),"lmnopqrstuv".into()];
+    state.autoplay_enabled=true;
+    state.repeat_playlist_enabled=true;
+    apply_receiver_command(&mut state,&test_config(),"remoteDisconnected",&serde_json::json!({"id":"a"})).unwrap();
+    assert!(state.current.is_some());assert_eq!(state.queue.len(),1);
+    apply_receiver_command(&mut state,&test_config(),"stopVideo",&serde_json::json!({})).unwrap();
+    assert!(state.current.is_none());assert!(state.queue.is_empty());assert!(!state.autoplay_enabled);
+    assert!(!state.repeat_playlist_enabled);assert!(state.youtube_receiver_playlist.is_empty());
+}
+
+#[test]
+fn opening_mpv_defers_all_metadata_and_requeues_preempted_lookup() {
+    let mut state=State::default();
+    let mut current=item("https://www.youtube.com/watch?v=abcdefghijk",false);
+    current.local_playback=true;
+    state.current=Some(current);
+    state.mpv_socket=Some(std::env::temp_dir().join(format!("mediabridge-missing-pipe-{}",std::process::id())));
+    state.pending_metadata.push_back("https://www.youtube.com/watch?v=abcdefghijk".into());
+    state.pending_queue_metadata.push_back("https://www.youtube.com/watch?v=lmnopqrstuv".into());
+    let (tx,_rx)=mpsc::channel();state.metadata_tx=Some(tx);
+    dispatch_pending_metadata(&mut state);
+    assert!(!state.metadata_in_flight);
+    assert_eq!(state.pending_metadata.len(),1);
+    assert_eq!(state.pending_queue_metadata.len(),1);
+    let (tx,rx)=mpsc::channel();state.metadata_rx=Some(rx);
+    state.metadata_in_flight=true;
+    state.metadata_in_flight_url=Some("https://www.youtube.com/watch?v=01234567890".into());
+    state.metadata_cancel=Some(Arc::new(AtomicBool::new(true)));
+    tx.send(("https://www.youtube.com/watch?v=01234567890".into(),Err("background media lookup was cancelled".into()))).unwrap();
+    drain_metadata(&mut state);
+    assert!(!state.metadata_in_flight);
+    assert_eq!(state.pending_queue_metadata.len(),2);
+    assert!(state.current.as_ref().unwrap().metadata_error.is_none());
+}
+
+#[test]
+fn receiver_playlist_validation_queue_updates_and_idle_volume() {
+    let (ids,index,time)=receiver_playlist(&serde_json::json!({"videoIds":"abcdefghijk,lmnopqrstuv","currentIndex":"1","currentTime":"12.5"})).unwrap();
+    assert_eq!(ids.len(),2);assert_eq!(index,1);assert_eq!(time,12.5);
+    for args in [serde_json::json!({"videoIds":"https://attacker.test"}),serde_json::json!({"videoIds":"abcdefghijk","currentIndex":"2"}),
+        serde_json::json!({"videoId":"abcdefghijk","currentTime":"NaN"}),serde_json::json!({"videoId":"abcdefghijk","currentTime":"-1"})] {
+        assert!(receiver_playlist(&args).is_err());
+    }
+    let mut state=State::default();
+    apply_receiver_command(&mut state,&test_config(),"setVolume",&serde_json::json!({"volume":"37"})).unwrap();
+    assert_eq!(state.last_mpv_volume,Some(0.37));
+    state.current=Some(receiver_item("abcdefghijk",0.0));
+    apply_receiver_command(&mut state,&test_config(),"updatePlaylist",&serde_json::json!({"videoIds":"lmnopqrstuv,abcdefghijk,01234567890","listId":"TEST_LIST"})).unwrap();
+    assert_eq!(state.queue.len(),1);
+    assert!(state.queue[0].local_playback);
+    assert_eq!(youtube_video_id(&state.queue[0].url).as_deref(),Some("01234567890"));
+    assert!(apply_receiver_command(&mut state,&test_config(),"updatePlaylist",&serde_json::json!({"videoIds":"lmnopqrstuv"})).is_err());
+    assert_eq!(state.queue.len(),1);
+}
+
+#[test]
+fn dial_http_discovery_settings_and_redacted_launch_diagnostics() {
+    let directory=std::env::temp_dir().join(format!("mediabridge-dial-test-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let path=directory.join("dial.json");
+    let server=Server::http("127.0.0.1:0").unwrap();
+    let address=server.server_addr().to_ip().unwrap();
+    let test_path=path.clone();
+    let worker=std::thread::spawn(move|| {
+        let mut cfg=test_config();cfg.bind=address.to_string();
+        let mut state=State::default();
+        state.dial=Some(dial::Discovery::start(test_path,address).unwrap());
+        for _ in 0..17 {
+            let request=server.recv_timeout(Duration::from_secs(5)).unwrap().expect("test HTTP request");
+            handle(request,&cfg,&mut state);
+        }
+    });
+    let call=|method:&str,path:&str,body:&str,origin:Option<&str>| {
+        let mut stream=TcpStream::connect(address).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        write!(stream,"{method} {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nContent-Length: {}\r\n",body.len()).unwrap();
+        if let Some(origin)=origin {write!(stream,"Origin: {origin}\r\n").unwrap();}
+        write!(stream,"\r\n{body}").unwrap();
+        let mut response=String::new();stream.read_to_string(&mut response).unwrap();response
+    };
+    let device=call("GET","/dial/device.xml","",None);
+    assert!(device.starts_with("HTTP/1.1 200"));
+    assert!(device.to_lowercase().contains(&format!("application-url: http://{address}/dial/apps/")));
+    let android_device=call("GET","/dial/device.xml","",Some("package:com.google.android.youtube"));
+    assert!(android_device.starts_with("HTTP/1.1 200"));
+    assert!(android_device.to_lowercase().contains("access-control-allow-origin: package:com.google.android.youtube"));
+    assert!(android_device.to_lowercase().contains(&format!("application-url: http://{address}/dial/apps/")));
+    assert!(call("GET","/dial/apps/YouTube","",Some("package:com.google.android.youtube")).starts_with("HTTP/1.1 200"));
+    assert!(call("GET","/dial/apps/Netflix","",Some("package:com.google.android.youtube")).starts_with("HTTP/1.1 403"));
+    assert!(call("GET","/dial/device.xml","",Some("package:com.google.android.youtube.attacker")).starts_with("HTTP/1.1 403"));
+    let chrome=call("GET","/dial/apps/YouTube","",Some("package:Google-Chrome.150.Windows"));
+    assert!(chrome.starts_with("HTTP/1.1 200"));
+    assert!(chrome.to_lowercase().contains("access-control-allow-origin: package:google-chrome.150.windows"));
+    assert!(call("GET","/dial/device.xml","",Some("package:Chromium.150.Linux")).starts_with("HTTP/1.1 200"));
+    assert!(call("GET","/dial/device.xml","",Some("package:Google-Chrome.attacker.Windows")).starts_with("HTTP/1.1 403"));
+    assert!(call("GET","/settings/dial","",Some("package:Google-Chrome.150.Windows")).starts_with("HTTP/1.1 403"));
+    assert!(call("POST","/dial/apps/YouTube","unknown=fixture",Some("package:Google-Chrome.150.Mac-OS-X")).starts_with("HTTP/1.1 422"));
+    assert!(call("GET","/dial/apps/YouTube","",None).contains("<state>stopped</state>"));
+    assert!(call("POST","/dial/apps/YouTube","token=PRIVATE_VALUE_NOT_TO_LOG&unknown=x",None).starts_with("HTTP/1.1 422"));
+    let status=call("GET","/settings/dial","",None);
+    assert!(status.contains("unsupported launch data"));assert!(status.contains("token"));
+    assert!(!status.contains("PRIVATE_VALUE_NOT_TO_LOG"));
+    let preflight=call("OPTIONS","/dial/apps/YouTube","",Some("https://www.youtube.com"));
+    assert!(preflight.starts_with("HTTP/1.1 204"));
+    assert!(preflight.to_lowercase().contains("access-control-allow-origin: https://www.youtube.com"));
+    assert!(call("OPTIONS","/dial/apps/YouTube","",Some("https://attacker.test")).starts_with("HTTP/1.1 403"));
+    assert!(call("POST","/settings/dial",r#"{"enabled":false,"friendly_name":"Living Room"}"#,None).starts_with("HTTP/1.1 200"));
+    assert!(call("GET","/dial/device.xml","",None).starts_with("HTTP/1.1 503"));
+    worker.join().unwrap();
+    let settings:serde_json::Value=serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(settings["enabled"],false);assert_eq!(settings["friendly_name"],"Living Room");
+    std::fs::remove_file(path).unwrap();std::fs::remove_dir(directory).unwrap();
+}
+
+#[test]
+fn playlist_repeat_rotates_in_order_and_does_not_duplicate_on_failed_transition() {
+    let mut state=State::default();
+    state.current=Some(item("https://example.com/a",false));
+    state.queue.extend([item("https://example.com/b",false),item("https://example.com/c",false)]);
+    post(&mut state,"/repeat_playlist",r#"{"enabled":true}"#);
+    assert!(state.repeat_playlist_enabled);
+    for expected in ["b","c","a","b"] {
+        requeue_completed_playlist_item(&mut state);
+        requeue_completed_playlist_item(&mut state);
+        assert_eq!(state.queue.len(),3);
+        assert!(!start_front_queued_with(&mut state,|state,_|{state.playback_epoch+=1;state.repeat_playlist_requeued_epoch=None;Err("fixture".into())}));
+        requeue_completed_playlist_item(&mut state);
+        assert_eq!(state.queue.len(),3);
+        state.queue_start_retry_at=None;
+        assert!(start_front_queued_with(&mut state,|state,item|{state.playback_epoch+=1;state.repeat_playlist_requeued_epoch=None;state.current=Some(item);Ok(())}));
+        assert_eq!(state.current.as_ref().unwrap().url,format!("https://example.com/{expected}"));
+        assert_eq!(state.queue.len(),2);
+    }
+    post(&mut state,"/repeat_playlist",r#"{"enabled":false}"#);
+    requeue_completed_playlist_item(&mut state);
+    assert_eq!(state.queue.len(),2);
+    post(&mut state,"/close","{}");
+    assert!(!state.repeat_playlist_enabled);
+}
+
+#[test]
+fn dial_pairing_uses_receiver_and_codes_are_redacted() {
+    assert_eq!(dial::pairing_code("pairingCode=SECRET_CODE").unwrap().as_deref(),Some("SECRET_CODE"));
+    assert!(dial::launch("YouTube","pairingCode=SECRET_CODE").is_err());
+    assert!(!safe_media_url("https://www.youtube.com/tv?pairingCode=SECRET_CODE").contains("SECRET_CODE"));
+    assert!(dial_origin_allowed("https://www.youtube.com",Some("YouTube")));
+    assert!(dial_origin_allowed("package:com.google.android.youtube",None));
+    for origin in ["package:Google-Chrome.150.Windows","package:Chromium.150.Linux","package:Google-Chrome.150.Mac-OS-X"] {
+        assert!(dial_origin_allowed(origin,Some("YouTube")));
+    }
+    for origin in ["package:Google-Chrome.150.Windows.attacker","package:Google-Chrome.150.Windows/","package:Unknown.150.Windows","package:Google-Chrome..Windows"] {
+        assert!(!dial_origin_allowed(origin,None));
+    }
+    assert!(dial_origin_allowed("package:com.google.android.youtube",Some("YouTube")));
+    assert!(!dial_origin_allowed("package:com.google.android.youtube",Some("Twitch")));
+    assert!(!dial_origin_allowed("package:com.google.android.youtube/",None));
+    assert!(!dial_origin_allowed("package:unknown.app",None));
+    assert!(!dial_origin_allowed("https://www.youtube.com.attacker.test",Some("YouTube")));
+    assert!(!dial_origin_allowed("https://www.netflix.com",Some("YouTube")));
+}
+
+#[test]
+fn browser_repeat_restarts_without_consuming_queue_and_surfaces_failures() {
+    for fail in [false,true] {
+        let listener=std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address=listener.local_addr().unwrap();
+        let peer=std::thread::spawn(move|| {
+            let (stream,_)=listener.accept().unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+            let mut socket=tungstenite::accept(stream).unwrap();
+            let command:serde_json::Value=serde_json::from_str(socket.read().unwrap().to_text().unwrap()).unwrap();
+            assert_eq!(command["method"],"script.evaluate");
+            assert_eq!(command["params"]["userActivation"],true);
+            assert!(command["params"]["expression"].as_str().unwrap().contains("v.currentTime=0"));
+            let result=if fail { serde_json::json!({"type":"exception"}) }
+                else {serde_json::json!({"type":"success","result":{"type":"string","value":"{\"restarted\":true}"}})};
+            socket.send(Message::Text(serde_json::json!({"id":command["id"],"type":"success","result":result}).to_string())).unwrap();
+        });
+        let (socket,_)=connect(format!("ws://{address}")).unwrap();
+        let mut state=State::default();
+        let mut current=item("https://example.com/video",false); current.browser=Some("librewolf".into());
+        state.current=Some(current); state.queue.push_back(item("https://example.com/next",false));
+        state.repeat_enabled=true;
+        state.librewolf_bidi=Some(LibreWolfBidi {socket,next_id:0,context_id:Some("tab".into()),
+            cached_at:Some(std::time::Instant::now()),cached_video:Some(LibreWolfVideoState{ended:true,..Default::default()}),
+            autoplay_attempted:true,fullscreen_attempted_at:None,unmatched_url_reported:None});
+        advance(&mut state,&test_config());
+        assert_eq!(state.current.as_ref().unwrap().url,"https://example.com/video");
+        assert_eq!(state.queue.len(),1);
+        assert!(state.history.is_empty());
+        assert_eq!(state.repeat_enabled,!fail);
+        assert_eq!(state.playback_error.is_some(),fail);
+        peer.join().unwrap();
+    }
+}
+
+#[test]
+fn repeat_route_rejects_invalid_requests_and_disables_without_active_playback() {
+    let mut state=State::default();
+    post(&mut state,"/repeat",r#"{"enabled":true}"#);
+    assert!(!state.repeat_enabled);
+    state.repeat_enabled=true;
+    post(&mut state,"/repeat",r#"{"enabled":"false"}"#);
+    assert!(state.repeat_enabled);
+    post(&mut state,"/repeat",r#"{"enabled":false,"extra":true}"#);
+    assert!(state.repeat_enabled);
+    post(&mut state,"/repeat",r#"{"enabled":false}"#);
+    assert!(!state.repeat_enabled);
+    state.repeat_enabled=true;
+    post(&mut state,"/close","{}");
+    assert!(!state.repeat_enabled);
+}
+
+#[test]
+fn browser_pointer_maps_normalized_coordinates_and_clamps_relative_movement() {
+    let request=|body|serde_json::from_str::<MouseRequest>(body).unwrap();
+    let (actions,point)=browser_mouse_actions(&request(r#"{"action":"click","x":32767,"y":32767}"#),None,800.0,600.0).unwrap();
+    assert_eq!(point,(799.0,599.0));
+    assert_eq!(actions[0]["actions"][1]["type"],"pointerDown");
+    assert_eq!(actions[0]["actions"][2]["type"],"pointerUp");
+    let (_,point)=browser_mouse_actions(&request(r#"{"action":"move_relative","dx":100,"dy":-1000}"#),Some(point),800.0,600.0).unwrap();
+    assert_eq!(point,(799.0,0.0));
+    assert!(browser_mouse_actions(&request(r#"{"action":"click","x":-1}"#),None,800.0,600.0).is_err());
+    assert!(browser_mouse_actions(&request(r#"{"action":"move"}"#),None,0.0,600.0).is_err());
+}
+
+#[test]
+fn managed_browser_requests_activated_youtube_fullscreen_and_leaves_twitch_alone() {
+    for theater in [false, true] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let url = if theater { "https://www.twitch.tv/channel" } else { "https://www.youtube.com/watch?v=abcdefghijk" };
+        let peer = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            for index in 0..if theater { 2 } else { 3 } {
+                let command: serde_json::Value = serde_json::from_str(socket.read().unwrap().to_text().unwrap()).unwrap();
+                let result = match index {
+                    0 => {
+                        assert_eq!(command["method"], "browsingContext.getTree");
+                        serde_json::json!({"contexts":[{"context":"tab","url":url}]})
+                    }
+                    1 => {
+                        assert_eq!(command["method"], "script.evaluate");
+                        let state = serde_json::json!({"hasVideo":true,"embeddedFullscreen":theater,"paused":false,
+                            "theaterActive":true,"chatExpandButton":{"x":25,"y":30}});
+                        serde_json::json!({"type":"success","result":{"type":"string","value":state.to_string()}})
+                    }
+                    2 if !theater => {
+                        let expression = command["params"]["expression"].as_str().unwrap();
+                        assert!(expression.contains("requestFullscreen"));
+                        assert_eq!(command["params"]["userActivation"], true);
+                        serde_json::json!({"type":"success","result":{"type":"string","value":"{\"fullscreen\":true}"}})
+                    }
+                    _ => {
+                        assert_eq!(command["method"], "input.performActions");
+                        let input = &command["params"]["actions"][0];
+                        assert_eq!(input["type"], if theater { "pointer" } else { "key" });
+                        if theater { assert_eq!(input["actions"][0]["x"].as_f64(), Some(25.0)); }
+                        else { assert_eq!(input["actions"][0]["value"], "f"); }
+                        serde_json::json!({})
+                    }
+                };
+                socket.send(Message::Text(serde_json::json!({"id":command["id"],"type":"success","result":result}).to_string())).unwrap();
+            }
+        });
+        let (socket, _) = connect(format!("ws://{address}")).unwrap();
+        let mut bidi = LibreWolfBidi {socket,next_id:0,context_id:Some("tab".into()),cached_at:None,cached_video:None,
+            autoplay_attempted:true,fullscreen_attempted_at:None,unmatched_url_reported:None};
+        assert!(bidi.refresh(url).unwrap().is_some());
+        peer.join().unwrap();
+    }
+}
+
+#[test]
+fn queued_launch_failure_preserves_order_and_retries_without_losing_history() {
+    let item = |url| serde_json::from_value::<QueueItem>(serde_json::json!({"url":url})).unwrap();
+    let mut state = State::default();
+    state.current = Some(item("https://example.com/finished"));
+    state.queue.push_back(item("https://example.com/next"));
+    state.queue.push_back(item("https://example.com/later"));
+    assert!(!start_front_queued_with(&mut state, |_state, _item| Err("profile is locked".into())));
+    assert_eq!(state.queue.len(), 2);
+    assert_eq!(state.queue[0].url, "https://example.com/next");
+    assert_eq!(state.current.as_ref().unwrap().url, "https://example.com/finished");
+    assert!(state.history.is_empty());
+    assert!(state.playback_error.as_ref().unwrap().contains("profile is locked"));
+    assert!(!start_front_queued_with(&mut state, |_, _| panic!("retry must be throttled")));
+    state.queue_start_retry_at = None;
+    assert!(start_front_queued_with(&mut state, |state, item| { state.current = Some(item); Ok(()) }));
+    assert_eq!(state.queue.len(), 1);
+    assert_eq!(state.current.as_ref().unwrap().url, "https://example.com/next");
+    assert_eq!(state.history.len(), 1);
+    assert!(state.playback_error.is_none());
+}
+
+#[test]
+fn browser_queue_navigation_reuses_tab_and_preserves_it_on_failure() {
+    for fail in [false, true] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            let command: serde_json::Value = serde_json::from_str(socket.read().unwrap().to_text().unwrap()).unwrap();
+            assert_eq!(command["method"], "browsingContext.navigate");
+            assert_eq!(command["params"]["context"], "existing-tab");
+            assert_eq!(command["params"]["url"], "https://example.com/next");
+            let reply = if fail {
+                serde_json::json!({"id":command["id"],"type":"error","message":"navigation failed"})
+            } else { serde_json::json!({"id":command["id"],"type":"success","result":{}}) };
+            socket.send(Message::Text(reply.to_string())).unwrap();
+        });
+        let (socket, _) = connect(format!("ws://{address}")).unwrap();
+        let mut bidi = LibreWolfBidi {socket, next_id:0, context_id:Some("existing-tab".into()),
+            cached_at:Some(std::time::Instant::now()), cached_video:None, autoplay_attempted:true,
+            fullscreen_attempted_at:Some(std::time::Instant::now()), unmatched_url_reported:None};
+        assert_eq!(bidi.navigate_playback("https://example.com/next").is_err(), fail);
+        assert_eq!(bidi.context_id.is_some(), fail);
+        assert_eq!(bidi.autoplay_attempted, fail);
+        peer.join().unwrap();
+    }
+}
+
+#[test]
+fn completed_browser_playback_closes_browser_and_reports_close_failures() {
+    for fail in [false, true] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            let command: serde_json::Value = serde_json::from_str(socket.read().unwrap().to_text().unwrap()).unwrap();
+            assert_eq!(command["method"], "browser.close");
+            let reply = if fail {
+                serde_json::json!({"id":command["id"], "type":"error", "message":"fixture close failed"})
+            } else { serde_json::json!({"id":command["id"], "type":"success", "result":{}}) };
+            socket.send(Message::Text(reply.to_string())).unwrap();
+        });
+        let (socket, _) = connect(format!("ws://{address}")).unwrap();
+        let mut state = State::default();
+        state.librewolf_bidi = Some(LibreWolfBidi {socket, next_id:0, context_id:Some("video-tab".into()),
+            cached_at:None, cached_video:None, autoplay_attempted:false, fullscreen_attempted_at:None,
+            unmatched_url_reported:None});
+        assert_eq!(close_finished_librewolf(&mut state), !fail);
+        assert_eq!(state.librewolf_bidi.is_none(), !fail);
+        assert_eq!(state.playback_error.is_some(), fail);
+        peer.join().unwrap();
+    }
+}
+
+#[test]
+fn browser_playback_always_uses_bundled_librewolf() {
+    for browser in [serde_json::Value::Null, serde_json::json!(""), serde_json::json!("firefox"),
+                    serde_json::json!("/usr/bin/firefox"), serde_json::json!("librewolf")] {
+        let mut item: QueueItem = serde_json::from_value(serde_json::json!({
+            "url":"https://example.com/video", "browser":browser
+        })).unwrap();
+        apply_browser_default(&mut item);
+        assert_eq!(item.browser.as_deref(), Some("librewolf"));
+    }
+    let mut local: QueueItem = serde_json::from_value(serde_json::json!({
+        "url":"https://example.com/video", "local":true
+    })).unwrap();
+    apply_browser_default(&mut local);
+    assert!(local.browser.is_none());
+    assert_eq!(browser_candidates("firefox"), browser_candidates("librewolf"));
+}
+#[test]
 fn flatpak_host_access_uses_effective_session_policy() {
     assert!(!flatpak_host_access_from_info("[Application]\norg.freedesktop.Flatpak=talk\n"));
     assert!(!flatpak_host_access_from_info("[Session Bus Policy]\norg.freedesktop.Notifications=talk\n"));
@@ -75,6 +447,19 @@ fn real_mpv_track_switches_and_off_preserve_loaded_lists() {
     assert!(subtitles.len()>=2 && audio.len()>=2,"fixture must expose two tracks of each kind");
     let mut state=State::default(); let mut current=item("https://example.com/fixture",false); current.local_playback=true;
     state.current=Some(current); state.mpv_socket=Some(socket.clone()); state.playback_epoch=9;
+    post(&mut state,"/repeat",r#"{"enabled":true}"#);
+    assert!(state.repeat_enabled);
+    assert_eq!(mpv_property(&socket,"loop-file"),Some(serde_json::json!("inf")));
+    post(&mut state,"/repeat",r#"{"enabled":false}"#);
+    assert!(!state.repeat_enabled);
+    let buffering = mpv_osd_options().into_iter().find(|option|option.starts_with("--osd-msg1=")).unwrap();
+    let buffering = buffering.strip_prefix("--osd-msg1=").unwrap();
+    mpv_ipc(&socket,serde_json::json!(["set_property","osd-msg1",buffering])).unwrap();
+    let expanded=mpv_ipc(&socket,serde_json::json!(["expand-text",buffering])).unwrap();
+    assert_eq!(expanded["data"], "", "buffering OSD must be absent during normal playback");
+    mpv_ipc(&socket,serde_json::json!(["set_property","pause",true])).unwrap();
+    let visible=mpv_ipc(&socket,serde_json::json!(["expand-text",buffering.replace("paused-for-cache","pause")])).unwrap();
+    assert!(visible["data"].as_str().unwrap().starts_with("Buffering... "));
     // Verify mpv accepts the literal-text and OSD seek prefixes over real IPC.
     mpv_ipc(&socket,serde_json::json!(["raw","show-text","Literal ${path}",1200])).unwrap();
     mpv_ipc(&socket,serde_json::json!(["osd-msg-bar","seek",1,"absolute"])).unwrap();
@@ -88,6 +473,12 @@ fn real_mpv_track_switches_and_off_preserve_loaded_lists() {
     control_mpv(&mut state,"forward",None).unwrap();
     control_mpv(&mut state,"rewind",None).unwrap();
     control_mpv(&mut state,"volume",Some(0.3)).unwrap();
+    apply_receiver_command(&mut state,&test_config(),"play",&serde_json::json!({})).unwrap();
+    assert_eq!(mpv_property(&socket,"pause"),Some(serde_json::json!(false)));
+    apply_receiver_command(&mut state,&test_config(),"pause",&serde_json::json!({})).unwrap();
+    assert_eq!(mpv_property(&socket,"pause"),Some(serde_json::json!(true)));
+    apply_receiver_command(&mut state,&test_config(),"seekTo",&serde_json::json!({"newTime":"2"})).unwrap();
+    apply_receiver_command(&mut state,&test_config(),"setVolume",&serde_json::json!({"volume":"30"})).unwrap();
     // ao=null can omit the volume property; real outputs retain it normally.
     if mpv_property(&socket,"volume").is_some() { assert_eq!(state.last_mpv_volume,Some(0.3)); }
     for (path,property,tracks) in [("/subtitles/select","sid",subtitles),("/audio/select","aid",audio)] {
@@ -102,6 +493,18 @@ fn real_mpv_track_switches_and_off_preserve_loaded_lists() {
         let raw=mpv_property(&socket,"track-list").unwrap();
         assert_eq!(media_tracks(&raw,if property=="sid" {"sub"} else {"audio"}).len(),tracks.len());
     }
+    // Before a file is ready, the same persistent OSD shows loading, then
+    // disappears once time-pos becomes available (checked above).
+    mpv_ipc(&socket,serde_json::json!(["set_property","force-window","immediate"])).unwrap();
+    mpv_ipc(&socket,serde_json::json!(["stop"])).unwrap();
+    for _ in 0..20 {
+        if mpv_property(&socket,"time-pos").and_then(|v|v.as_f64()).is_none(){break;}
+        thread::sleep(Duration::from_millis(25));
+    }
+    let expanded=mpv_ipc(&socket,serde_json::json!(["expand-text",buffering])).unwrap();
+    assert_eq!(expanded["data"],"Loading video...");
+    assert!(mpv_startup_in_progress(&state));
+    assert_eq!(media_status(&mut state).playback_state,"loading");
 }
 
 #[test]
@@ -234,13 +637,17 @@ fn item(url: &str, generated: bool) -> QueueItem {
     item
 }
 
-fn post(state: &mut State, path: &str, body: &'static str) {
-    let cfg = Config {
+fn test_config() -> Config {
+    Config {
         bind: "127.0.0.1:8765".into(), moonlight: "moonlight".into(), moonlight_args: vec![],
         ytdlp_cookies_from_browser: None, cookies_browser: "off".into(), cookies_profile: None,
         remote_origin_servers: vec![], default_screen: None, default_quality: Some("720".into()),
         default_video_codec: "h264".into(), subtitles: false, preferred_language: None, track_preferences: Default::default(),
-    };
+    }
+}
+
+fn post(state: &mut State, path: &str, body: &'static str) {
+    let cfg=test_config();
     let request = tiny_http::TestRequest::new().with_method(Method::Post).with_path(path).with_body(body);
     handle(request.into(), &cfg, state);
 }

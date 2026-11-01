@@ -8,6 +8,8 @@ BASE_URL="http://mediabridge-host:8765"
 
 The default port is `8765`, but it can be changed in MediaBridge settings. The service must be running and reachable from the client. Use the host's LAN address for another device on the network, for example `http://192.168.1.20:8765`.
 
+From v1.1.0, `GET /status` includes `version` (application version, for example `"1.1.0"`) and `server_build` (12-character source fingerprint). The dashboard displays both from the running server. The fingerprint identifies embedded server/dashboard sources and Cargo dependencies, not the Flatpak runtime or installer. Older builds omit these fields.
+
 ## SMB credential providers
 
 ### What a provider is, and what is included
@@ -184,11 +186,11 @@ curl -sS -X POST "$BASE_URL/pause"
 | `screen` | integer | Optional zero-based display index, 0–32. Platform and desktop support determine whether placement is honored. |
 | `subtitles` | boolean | Per-item subtitle preference. |
 | `load_multiple_audio_tracks` | boolean | Optional per-video override of `track_preferences.load_multiple_audio_tracks`. False requests only extracted original/default audio; true exposes alternate extracted formats for track selection. Applies to mpv and takes effect at launch. Embedded tracks in one file remain visible either way. |
-| `browser` | string | Optional browser executable/name for browser playback, such as `"librewolf"`. Set it to `"librewolf"` to use the managed profile, which can open any HTTP(S) website on supported builds. |
+| `browser` | string | Legacy compatibility field. Browser playback always uses bundled LibreWolf and its managed profile on Windows, native Linux, and Flatpak. Other values are normalized to `"librewolf"`; system browsers are never launched. |
 | `browser_args` | array of strings | Optional extra browser arguments when selecting a browser. |
 | `youtube_mode` | string | YouTube browser mode; `"regular"` is the default and `"tv"` selects the TV/Leanback view. |
 | `youtube_guest` | boolean | Request the YouTube guest experience in browser playback. |
-| `twitch_theater` | boolean | Request Twitch theater mode in browser playback. |
+| `twitch_theater` | boolean | Legacy compatibility field. Managed LibreWolf uses Twitch video fullscreen; chat visibility is controlled manually with the mouse. |
 | `title` | string | Optional display title/metadata hint. |
 | `queued_by_user_id` | string | Optional opaque caller-supplied attribution; MediaBridge does not authenticate this identity. |
 | `duration_seconds` | number | Optional duration hint; successful metadata lookup retains positive finite durations. |
@@ -243,13 +245,71 @@ curl -sS -X POST "$BASE_URL/play" \
   -d '{"url":"https://www.youtube.com/watch?v=VIDEO_ID","local":true,"quality":"1080"}'
 ```
 
-To open a regular website in the managed LibreWolf browser, set `browser` explicitly:
+All browser playback uses bundled LibreWolf, including requests with omitted, empty, or legacy browser selections. Missing bundled LibreWolf returns a launch error; there is no system-browser fallback.
+
+### Repeat the current video
+
+`POST /repeat` accepts `{"enabled":true}` or `{"enabled":false}` and returns `{"ok":true,"repeat_enabled":true}` (or `false`). `GET /status` includes `repeat_enabled`. The dashboard exposes **Repeat this video** beside the playback controls.
+
+`POST /repeat_playlist` accepts the same body. Both repeat endpoints return `repeat_enabled` and `repeat_playlist_enabled`, also exposed by `/status`. Enabling one mode disables the other. The dashboard provides **Repeat this playlist**.
+
+Playlist repeat treats the current video plus the live queue as the playlist: after each normal completion it puts a copy at the queue's end, with its saved resume position cleared. `A → B → C` becomes `A → B → C → A → B → C…`; additions/removals affect the next rotation. A failed transition retains the next item without duplicating the completed item. Decoder/process failures are not recycled. Manual Next preserves playlist repeat and puts the skipped item at the end. Closing or replacing playback resets it. Turning repeat off stops further recycling; entries already in the queue remain in their displayed order. Playlist repeat takes precedence over autoplay while it has items to cycle. Enabling without a current item returns `409`.
+
+Repeat loops the current mpv file or restarts the current seekable browser video without consuming queued items or advancing autoplay. It is off by default, applies only to the current playback, and resets when another item starts or playback is closed. Manual Next still advances. The close timer still closes playback. It is session state, not a saved default. Enabling with no current video or an unseekable browser video returns `409`; malformed or unknown fields return `400`. A browser restart failure disables repeat and sets `playback_error`. Live streams without seeking cannot be repeated meaningfully.
+
+```sh
+curl -sS -X POST "$BASE_URL/repeat" -H 'Content-Type: application/json' -d '{"enabled":true}'
+```
+
+When the managed video ends and there is no queued item or pending autoplay continuation, MediaBridge closes bundled LibreWolf. Consecutive browser items navigate the existing managed tab instead of launching another browser process. Automatic queue advancement retains the next item until navigation or launch succeeds; synchronous failures leave it at the front, report `playback_error`, and retry after three seconds. Navigation acceptance does not guarantee that the website will load or play successfully. Automatic browser-close failures are also logged and exposed through `playback_error`.
+
+To open a regular website in the managed LibreWolf browser on any supported build, set `browser` explicitly:
 
 ```sh
 curl -sS -X POST "$BASE_URL/play" \
   -H 'Content-Type: application/json' \
   -d '{"url":"https://example.com/","browser":"librewolf"}'
 ```
+
+### Experimental DIAL discovery and launches
+
+DIAL is [Discovery And Launch](https://www.dial-multiscreen.org/overview), not the modern Google Cast transport. MediaBridge implements IPv4 SSDP discovery and the basic DIAL app HTTP lifecycle, with launch adapters for `YouTube`, `Twitch`, and `Netflix`. App-specific pairing/control protocols are separate; third-party Cast buttons are **not guaranteed** to discover or control this receiver. In particular, Cast-only senders use a different discovery/session protocol. See the [DIAL specification](https://www.dial-multiscreen.org/dial/protocol-specification) and [Google Cast protocol flow](https://chromium.googlesource.com/openscreen/+/HEAD/cast/docs/protocol_flow.md).
+
+Discovery is enabled by default, with device name `MediaBridge` and a persistent device UUID. Settings → **DIAL discovery** can rename or disable it. IPv4 LAN binding, multicast reachability, UDP port `1900`, and the configured server TCP port are required. Loopback-only/IPv6-only binds do not advertise; socket errors appear in DIAL settings without stopping the main server. Flatpak already shares the host network; host firewall rules still apply. Native installers add a discovery rule; the Flatpak installer does not modify the host firewall. Restart after fixing a discovery socket initialization error. From v1.2.5, a wildcard bind joins DIAL multicast on each active non-loopback, non-link-local IPv4 interface and advertises a matching address on each one. This avoids default multicast routing through WSL/VPN/virtual adapters hiding the server from Ethernet/Wi-Fi. An explicit IPv4 bind uses that interface only. `/settings/dial` includes `interfaces`, the successfully joined IPv4 addresses. Restart after adding/changing network adapters; addresses are enumerated at startup.
+
+| Route | Behavior |
+| --- | --- |
+| `GET /dial/device.xml` | UPnP device XML with an absolute `Application-URL` header pointing to `/dial/apps/`. SSDP replies advertise this document. |
+| `GET /dial/apps/{app}` | DIAL app XML reporting `running` or `stopped`, with a `run` link while the launched playback or YouTube receiver session is active. Unknown apps return `404`. |
+| `POST /dial/apps/{app}` | Parse launch data and start the selected adapter. `201` and `Location: …/{app}/run` mean launch accepted, not verified playback/pairing. |
+| `POST /dial/apps/{app}/run` | MediaBridge extension accepting subsequent link/ID payloads using the same adapters; not a universal vendor control protocol. |
+| `DELETE /dial/apps/{app}/run` | Stop that app's still-current playback. It cannot stop a newer unrelated playback. |
+| `GET /settings/dial` | `enabled`, `friendly_name`, `uuid`, `listening`, discovery `error`, app names, and the last 20 redacted request summaries. |
+| `POST /settings/dial` | Persist `{"enabled":true,"friendly_name":"Living Room"}`. Unknown fields/invalid names return `400`. Names are limited to 80 UTF-8 bytes without control characters. Changes apply without a server restart. |
+
+Launch bodies may be URL-encoded fields, a flat JSON object, or a raw HTTP(S) URL, up to 8192 bytes. Unsupported/opaque app-specific launch data returns `422` and adds a diagnostic summary instead of claiming successful pairing.
+
+| App and launch fields | Playback target |
+| --- | --- |
+| YouTube `v`, `videoId`, `video_id`, or `contentId` with an 11-character video ID | mpv through yt-dlp. |
+| Twitch `channel`, or a numeric video/content ID | mpv through yt-dlp. |
+| `url`, `contentUrl`, or `content_url` belonging to the selected app's domain | YouTube video/Twitch content links → mpv; home/login pages and Netflix → managed LibreWolf. |
+| YouTube `pairingCode` (including Android `dialLaunch`/`theme` fields) | From v1.2.0, start a YouTube Lounge receiver, register the phone code, and receive video selections and controls for yt-dlp/mpv. Does not open a browser pairing URL. |
+| Empty launch | Managed LibreWolf: YouTube TV receiver page, Twitch home, or Netflix login. Netflix content IDs open its browser watch page because DRM playback is not a generic yt-dlp path. |
+
+A YouTube pairing code takes priority over media fields to establish the receiver session. The phone then sends playback commands over YouTube Lounge. No account tokens or pairing-code values are logged or returned in diagnostics; summaries contain app name, payload byte count, field names, and routing outcome. `/settings/dial` uses the same local-dashboard Origin restriction as other settings routes. DIAL app routes accept native requests without an Origin, or registered app HTTPS origins/configured API origins. From v1.1.2, the exact Android YouTube origin `package:com.google.android.youtube` is also accepted for device discovery and YouTube routes, matching requests from the Android app. The Android exception does not permit other packages or other app routes. From v1.2.2, DIAL also accepts native Chrome/Chromium origins in the format `package:Google-Chrome.<major>.<OS>` or `package:Chromium.<major>.<OS>` for discovery and registered DIAL apps. Product/version/OS syntax is validated; these exceptions never grant access to general API/settings routes and are interoperability rules, not authentication of a client. This addresses desktop browser DIAL app probes that older builds rejected with 403; end-to-end desktop YouTube casting still requires verification.
+
+```sh
+curl "$BASE_URL/dial/device.xml"
+curl -X POST "$BASE_URL/dial/apps/YouTube" -d 'v=abcdefghijk'
+curl "$BASE_URL/settings/dial"
+```
+
+The YouTube receiver requires outbound HTTPS access to YouTube. `GET /settings/dial` adds `youtube_receiver: {"phase":"connecting|waiting_for_phone|connected|error|stopped","error":null}`. `waiting_for_phone` means registration succeeded; `connected` means a sender connection/query/playback command has actually been received. From v1.2.1, `commands_received`, `last_command`, and `phone_connected` provide redacted command-channel diagnostics; `messages_sent` counts accepted outgoing feedback messages. Registration includes the same app and device identity used by the command channel. Use Refresh status under DIAL discovery to inspect errors. Codes and tokens remain in memory and are omitted from diagnostics. A fresh receiver screen is registered per launch; reselect the device from the phone to reconnect after restart/error. Network operations run outside the main HTTP/playback loop.
+
+Supported Lounge commands include `setPlaylist`, `setVideo`, `updatePlaylist`, `play`, `pause`, `seekTo`, `setVolume`, `stopVideo`, next/previous, and playback/volume/playlist queries. A selected playlist becomes the mpv queue; state, position, duration, volume and queue feedback are sent to the phone. Replacing playback through the normal API, `/close`, the close timer, or DIAL DELETE ends the session; `stopVideo` stops its media while keeping the receiver available. Disabling DIAL disconnects the receiver without stopping an already playing video. Transient command-channel failures are retried up to three times; expired/rejected sessions require selecting MediaBridge again. This is an experimental implementation of an unofficial protocol: live registration, sender pairing lookup, and delivery of a synthetic sender playlist command have been tested; actual Android pairing and playback still require device verification. Netflix/Twitch vendor pairing is not implemented by this YouTube adapter. From v1.2.6, an authoritative YouTube `loungeStatus` event closes playback only when `connectionEventDetails` identifies a known sender that has left, `ui` is explicitly true, and no other sender remains in the device list. This clears the playback queue, repeat and autoplay while keeping the receiver available. Generic `remoteDisconnected`, network/channel errors, missing/invalid status data and implicit disconnects never trigger that close. With multiple connected senders, one sender leaving does not stop the others. Receiver diagnostics include `connected_senders` and `last_disconnect` (`manual`, `implicit_or_unknown`, or `unknown`); sender identities are not exposed.
+
+The diagnostics can identify incoming launch formats for future adapters. They do not intercept app commands sent to an external vendor service: those require an implementation of that app's follow-up protocol, or a suitable browser receiver. General Chromecast mirroring, Cast V2 sessions, DRM removal, and universal pairing-code handling are not implemented.
 
 `POST /queue` inserts before the first generated suggestion, preserving the existing queue. Send `at_end:true` to append after the entire queue. If nothing is playing, it starts the submitted item immediately.
 
@@ -507,6 +567,10 @@ These mechanisms follow mpv's documented [track properties](https://mpv.io/manua
 
 #### Brief mpv on-screen feedback
 
+From v1.2.4, mpv uses `force-window=immediate` to initialize its window/video output while URL extraction proceeds. **Loading video…** is shown until mpv exposes `time-pos`, then clears automatically. `/status` reports `playback_state:"loading"` and `playing:false` during this initial wait; existing play/close endpoints remain usable. This overlaps player preparation with extraction, not video download before a stream URL exists. New current/queue metadata lookups are deferred during mpv startup; an in-flight metadata lookup is cancelled and retried afterward without reporting the cancellation as a metadata failure. Queue pre-extraction and persistent-player reuse are not part of this change.
+
+`tests/mpv-startup.ps1` checks early video-output initialization with a four-second asynchronous load-hook delay, loading OSD expansion, and automatic message clearing. The delay simulates extraction without network access; it is not an HDD or live YouTube benchmark.
+
 Local mpv launches use transient OSD messages rather than a persistent playback-status overlay:
 
 | Trigger | Feedback | Duration |
@@ -519,7 +583,7 @@ Local mpv launches use transient OSD messages rather than a persistent playback-
 
 The messages are driven by the existing playback/track endpoints; no additional request fields or OSD route is needed. Later messages replace earlier ones instead of accumulating. Track metadata is sent as literal text, stripped of control characters, and capped at 180 characters. Track changes made by initial automatic preference matching do not replace the startup title with extra notifications.
 
-MediaBridge sets `osd-level=1`, `osd-duration=1200`, `osd-on-seek=msg-bar`, and a 2000 ms startup title message. It explicitly requests seek OSD because IPC controls do not always show mpv's normal keyboard feedback by default. OSD delivery is best effort: failure to display feedback does not make an otherwise successful control fail. This applies to local mpv only; browser playback retains the site's own player UI. Existing mpv scripts or manual OSD changes may affect appearance.
+MediaBridge sets `osd-level=1`, `osd-duration=1200`, `osd-on-seek=msg-bar`, and a 2000 ms startup title message. While mpv reports `paused-for-cache=yes`, a **Buffering… N%** message stays visible and disappears when cache buffering ends. It reflects mpv's cache state, not every possible decoder, server, or network stall. Repeat changes show a brief on/off message. Normal playback has no persistent status overlay. Other brief OSD messages can temporarily cover the buffering message. OSD delivery is best effort and existing mpv scripts or manual OSD changes may affect appearance.
 
 The native command prefixes and play/pause/seek/track operations were checked against an isolated Windows mpv instance. That fixture uses null audio/video outputs, so it validates command handling rather than the visual appearance of a particular renderer. See the upstream [mpv OSD options](https://mpv.io/manual/stable/#osd) and [command prefixes](https://mpv.io/manual/stable/#input-command-prefixes).
 
@@ -591,6 +655,12 @@ curl -sS -X POST "$BASE_URL/sleep"
 
 `POST /mouse` sends pointer input to the MediaBridge computer. This is useful for integrations that provide a remote touchpad. Absolute `x`/`y` coordinates are in the range 0–32767. Relative `dx`/`dy` values may be signed and range from -32767 to 32767. `button` is `left`, `right`, or `middle` and defaults to `left`.
 
+Inside the updated Flatpak, `/mouse` controls the desktop without requiring playback. X11 uses bundled xdotool; absolute coordinates map to the X11 screen geometry. Wayland uses the Remote Desktop portal and requires local approval, with support depending on the desktop's portal backend. Wayland supports `move_relative` and `click_current` at the real desktop pointer; absolute `move`/`click` return an error because this input-only session does not request screen sharing. No ydotool, root, or host-command override is required. Native builds retain their existing input backends.
+
+`GET /settings/mouse` reports `supported` (availability of the Flatpak settings bridge), `backend` (`x11`, `portal`, or `native`), `scope` (`desktop`), and, for Flatpak, `enabled`, `pending`, `absolute_supported`, and `error`. `POST /settings/mouse {"enabled":true}` requests Wayland approval asynchronously; poll GET while `pending` is true. `{"enabled":false}` closes/cancels the portal session. X11 input is available directly and does not require these permission actions. Native builds return `supported:false` because this settings bridge is Flatpak-only, not because native mouse input is unavailable. From v1.2.1, enabling control saves the choice and requests persistent permission on Remote Desktop portal v2+. On startup, MediaBridge restores the session using a private single-use restore token and saves its replacement. GET also reports `remembered` (saved preference) and `persistent_permission` (a restore token is available, not a guarantee of permission). Disabling through the dashboard/API clears the preference and token; ordinary shutdown preserves them. Reinstalling/updating preserves this choice while app data remains. Older/unsupported backends or revoked grants may require local approval again. Enable once after upgrading from older builds that did not save the choice. Unsupported portals and denied requests are reported through `error`. The dashboard exposes these actions under Desktop mouse.
+
+Browser `/volume`, `/volume_up`, and `/volume_down` control the HTML video's volume through BiDi, unmuting it when setting a positive volume. Muted video reports volume `0`. YouTube fullscreen is requested through BiDi with explicit user activation, with the resulting fullscreen state checked and unsuccessful requests logged. No host keyboard/mouse injection tool is required for these video controls.
+
 Supported actions are `move`, `click`, `move_relative`, and `click_current`.
 
 ```sh
@@ -626,7 +696,7 @@ The response exposes the current item separately from the waiting queue. `curren
 | `autoplay_status` | Human-readable Mix scan progress; queue positions refer to the full live queue. |
 | `playing` | `true` when the state is reported as playing. |
 | `mirroring` | Whether a Moonlight process is active. |
-| `playback_state` | Player state such as `playing`, `paused`, `idle`, `mirroring`, or `unknown`. |
+| `playback_state` | Player state such as `loading` (mpv startup), `playing`, `paused`, `idle`, `mirroring`, or `unknown`. |
 | `playback_error` | Current playback error, if reported. |
 | `title`, `artist`, `album` | Current media metadata. For managed LibreWolf pages, `title` reports the document title when its tab can be matched, including pages without a video. |
 | `artwork_url` | Current artwork/thumbnail URL. |
@@ -883,3 +953,5 @@ Error bodies generally use this shape:
 ```json
 {"error":"Human-readable explanation"}
 ```
+
+Dashboard branding: GET /icon.png serves the application logo as PNG; GET /favicon.ico serves the multi-resolution Windows/browser icon. Both are embedded in the server, so clients do not need separate image files.

@@ -45,6 +45,8 @@ These are declared in [Cargo.toml](Cargo.toml). [Cargo.lock](Cargo.lock) records
 | --- | --- |
 | [Serde](https://serde.rs/) / [serde_json](https://github.com/serde-rs/json) | Configuration and JSON API serialization. |
 | [RustCrypto sha1](https://github.com/RustCrypto/hashes) | Protocol hashing. |
+| [socket2](https://github.com/rust-lang/socket2) | Reusable multicast sockets for DIAL/SSDP discovery. |
+| [if-addrs](https://github.com/messense/if-addrs) | Active IPv4 interface enumeration for DIAL on hosts with Ethernet, Wi-Fi, VPN and virtual adapters. |
 | [tiny_http](https://github.com/tiny-http/tiny-http) | HTTP server. |
 | [tungstenite](https://github.com/snapview/tungstenite-rs) | WebSocket communication for browser automation. |
 | [tray-icon](https://github.com/tauri-apps/tray-icon) | Desktop notification-area/tray icon. |
@@ -53,6 +55,8 @@ These are declared in [Cargo.toml](Cargo.toml). [Cargo.lock](Cargo.lock) records
 | [gtk](https://github.com/gtk-rs/gtk3-rs) | GTK 3 bindings on Linux. |
 
 ## Build and packaging
+
+The YouTube Lounge receiver is independently implemented from protocol observations in [plaincast](https://github.com/aykevl/plaincast) and [yt-cast-receiver](https://github.com/patrickkfkan/yt-cast-receiver). Their code is not bundled or copied. YouTube Lounge is an unofficial service protocol, separate from DIAL. HTTPS uses [reqwest](https://github.com/seanmonstar/reqwest) (MIT/Apache-2.0) with [rustls](https://github.com/rustls/rustls); Cargo.lock records transitive dependencies.
 
 - [Rust, Cargo](https://www.rust-lang.org/) and [rustup](https://rustup.rs/) — compiler, dependency management, and toolchain installation.
 - [7-Zip](https://www.7-zip.org/) and [Inno Setup](https://jrsoftware.org/isinfo.php) — Windows extraction and installer creation.

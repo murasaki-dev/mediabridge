@@ -18,15 +18,39 @@ __pycache__/
 /build-linux.sh
 /build-installer.bat
 /build-installer.ps1
+/build-icons.ps1
 /install-deps.bat
 /MediaBridge.iss
 /packaging/flatpak/build-runtime.sh
 /packaging/flatpak/fetch-tools.py
 
+# Python virtual environments
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Model caches and downloaded model weights
+.cache/
+.cache-huggingface/
+/models/
+*.gguf
+*.safetensors
+*.onnx
+
+# SQLite databases
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
 # Machine-specific settings, logs and credentials
 /mediabridge.json
 /mediabridge.log
 /mediabridge-*.log
+*.log
 *.cookies.txt
 cookies.txt
 .env

@@ -64,6 +64,7 @@ rm -f "$BIN_DIR/mediabridge" "$BIN_DIR/mediabridge-dashboard" "$BIN_DIR/mediabri
   "$BIN_DIR/mediabridge-autostart" "$BIN_DIR/mediabridge-librewolf" \
   "$BIN_DIR/mediabridge-run" "$BIN_DIR/mediabridge-uninstall" \
   "$DESKTOP_DIR/mediabridge.desktop" "$AUTOSTART_FILE"
+rm -f "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/512x512/apps/mediabridge.png"
 
 if [[ "$PURGE_DATA" -eq 1 ]]; then
   rm -rf -- "$APP_DIR" "$CONFIG_DIR" "$STATE_DIR"

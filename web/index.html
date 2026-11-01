@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>MediaBridge</title>
+  <link rel="icon" type="image/png" href="/icon.png">
+  <link rel="apple-touch-icon" href="/icon.png">
   <style>
     :root { font: 16px/1.45 system-ui, sans-serif; color: #edf2f7; background: #11151b; }
     * { box-sizing: border-box; }
@@ -90,7 +92,7 @@
   </style>
 </head>
 <body>
-  <header class="row"><button id="toggle-settings" type="button" aria-expanded="false" aria-controls="settings-drawer">☰ Settings</button><h1>MediaBridge</h1><span id="connection" class="muted grow">Connecting…</span></header>
+  <header class="row"><button id="toggle-settings" type="button" aria-expanded="false" aria-controls="settings-drawer">☰ Settings</button><img src="/icon.png" alt="" width="36" height="36" style="border-radius:6px"><h1>MediaBridge</h1><span id="server-version" class="muted"></span><span id="connection" class="muted grow">Connecting…</span></header>
   <div id="onboarding-slot"></div>
   <section id="account-setup-card" class="card" aria-labelledby="accounts-heading">
     <h2 id="accounts-heading">Accounts</h2><p class="muted">Sign-in closes playback and this dashboard. Reopen when finished.</p>
@@ -152,6 +154,17 @@
       <textarea id="flatpak-host-command" readonly spellcheck="false">flatpak override --user --talk-name=org.freedesktop.Flatpak io.github.murasaki_dev.MediaBridge</textarea>
       <p class="muted">Quit MediaBridge using GNOME's ×, then reopen it. Host Python 3 and libX11 are also required.</p>
       <button id="flatpak-host-recheck" type="button">Recheck access</button>
+    </details><details class="settings-group"><summary>Desktop mouse</summary>
+      <div class="row"><button id="enable-desktop-mouse" type="button">Enable desktop control</button><button id="disable-desktop-mouse" type="button">Disconnect</button><button id="refresh-desktop-mouse" type="button">Refresh status</button></div>
+      <p id="desktop-mouse-status" class="muted" role="status"></p>
+      <details class="help"><summary aria-label="Desktop mouse help">?</summary><div role="note">Controls the desktop and other apps. X11 uses native pointer input. Wayland requires approval on the server computer through a compatible Remote Desktop portal; your choice is saved and restored at startup when the desktop supports persistent permission. Otherwise it may ask for approval again. Disconnect disables automatic restoration.</div></details>
+    </details><details class="settings-group"><summary>DIAL discovery</summary>
+      <label><input id="dial-enabled" type="checkbox" style="width:auto"> Enable LAN discovery</label>
+      <label for="dial-name">Device name</label><input id="dial-name" maxlength="80" value="MediaBridge">
+      <div class="row"><button id="save-dial" type="button">Save</button><button id="refresh-dial" type="button">Refresh status</button></div>
+      <p id="dial-status" class="muted" role="status"></p>
+      <details class="help"><summary aria-label="DIAL help">?</summary><div role="note">Experimental DIAL discovery, not full Chromecast support. YouTube pairing uses a receiver for mpv playback and phone controls; outbound HTTPS to YouTube is required. Twitch media links use mpv; login pages and Netflix use LibreWolf. Refresh status to check pairing errors. Other apps may need separate adapters. Allow UDP 1900 and the server TCP port through the host firewall. Diagnostics omit codes and tokens.</div></details>
+      <details><summary>Recent launch requests</summary><pre id="dial-diagnostics" style="white-space:pre-wrap"></pre></details>
     </details><details class="settings-group"><summary>Server port</summary><section class="card" aria-labelledby="server-port-heading">
       <h2 id="server-port-heading">Server port</h2>
       <label for="server-port">TCP port</label>
@@ -185,6 +198,8 @@
       <button id="next" type="button" aria-label="Next video" title="Next video" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 5v14M5 5l10 7-10 7Z"/></svg></button>
       <button id="quit" type="button" aria-label="Close all playback" title="Close all playback, including browser, Moonlight, and managed Steam"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none"/></svg></button>
     </div>
+    <label title="Repeat the current video without advancing the queue. Resets when you replace or close playback."><input id="repeat-video" type="checkbox" style="width:auto" disabled> Repeat this video</label>
+    <label title="Put each finished video at the end of the queue and keep cycling until disabled."><input id="repeat-playlist" type="checkbox" style="width:auto" disabled> Repeat this playlist</label>
     <label for="volume">Volume <span id="volume-label">—</span></label>
     <div class="row"><button data-control="volume_down" aria-label="Volume down">−</button><input id="volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume"><button data-control="volume_up" aria-label="Volume up">+</button></div>
   </section>
@@ -199,7 +214,7 @@
     <details><summary>Playback options</summary><div class="option-grid">
       <div id="quality-wrap"><label for="quality">Maximum quality</label><select id="quality"><option value="2160">4K · 2160p</option><option value="1440">1440p</option><option value="1080">1080p</option><option value="720" selected>720p</option><option value="480">480p</option></select></div>
       <div id="screen-wrap"><label id="screen-label" for="screen">mpv display index</label><input id="screen" type="number" min="0" max="32" step="1" placeholder="Default" style="width:110px"><small id="screen-help" class="muted">Optional, starts at 0</small></div>
-      <div id="browser-wrap" class="hidden"><label for="browser">Browser</label><select id="browser"><option value="chromium">Chromium</option><option value="firefox">Firefox</option><option value="librewolf">MediaBridge LibreWolf</option><option value="">System default</option></select></div>
+      <div id="browser-wrap" class="hidden"><label for="browser">Browser</label><select id="browser"><option value="librewolf">MediaBridge LibreWolf</option></select></div>
     </div>
     <label style="display:flex;gap:8px;align-items:center;margin-top:10px"><input id="subtitles" type="checkbox"> Load subtitles (slower)</label>
     <label><input id="multiple-audio" type="checkbox"> Alternate audio tracks</label>
@@ -236,9 +251,9 @@
     <ol id="history"><li class="muted">History is empty</li></ol>
   </details></section>
   <section id="touchpad-card" class="card">
-    <div class="row"><h2 style="margin:0;flex:1">Host touchpad</h2><button id="toggle-touchpad" type="button" aria-expanded="false" aria-controls="touchpad-controls">Show</button></div>
+    <div class="row"><h2 id="touchpad-heading" style="margin:0;flex:1">Host touchpad</h2><button id="toggle-touchpad" type="button" aria-expanded="false" aria-controls="touchpad-controls">Show</button></div>
     <div id="touchpad-controls" class="hidden">
-      <details class="help"><summary aria-label="Touchpad help" aria-describedby="help-12">?</summary><div id="help-12" role="note">Drag to move the Linux pointer. Tap or click for left click; use the buttons for right and middle click.</div></details>
+      <details class="help"><summary aria-label="Touchpad help" aria-describedby="help-12">?</summary><div id="help-12" role="note">Drag to move the pointer. Tap for left click; use the buttons for right and middle click. On Flatpak Wayland, enable Desktop mouse in settings and approve it on the server computer first.</div></details>
       <div id="touchpad" role="application" aria-label="Remote mouse touchpad">Touch or drag here</div>
       <div class="row" style="margin-top:10px"><button data-mouse-click="left">Left click</button><button data-mouse-click="right">Right click</button><button data-mouse-click="middle">Middle click</button></div>
     </div>
@@ -432,6 +447,42 @@
     finally { button.disabled = false; }
   };
   loadRemoteOrigins();
+  function renderDial(value) {
+    $('dial-enabled').checked = Boolean(value.enabled);
+    $('dial-name').value = value.friendly_name || 'MediaBridge';
+    $('dial-status').textContent = !value.enabled ? 'Discovery is off' : value.error || (value.listening ? 'Listening for DIAL devices' : 'Discovery is starting');
+    if (value.youtube_receiver && value.youtube_receiver.phase !== 'stopped') {
+      $('dial-status').textContent += ` · YouTube: ${value.youtube_receiver.phase}${value.youtube_receiver.error ? ' — ' + value.youtube_receiver.error : ''}`;
+    }
+    $('dial-diagnostics').textContent = JSON.stringify(value.recent_requests || [], null, 2);
+  }
+  function renderDesktopMouse(value) {
+    $('enable-desktop-mouse').disabled = !value.supported || value.enabled || value.pending;
+    $('disable-desktop-mouse').disabled = value.backend !== 'portal' || !value.enabled && !value.pending;
+    $('desktop-mouse-status').textContent = value.error || (value.pending ? 'Approve desktop mouse control on the server computer, then refresh status.' : value.enabled ? `Desktop control ready (${value.backend}).` : value.supported ? 'Desktop control disconnected.' : 'Native desktop input uses the existing system input backend.');
+  }
+  async function refreshDesktopMouse() {
+    try { renderDesktopMouse(await api('/settings/mouse', null, 'GET')); }
+    catch (error) { $('desktop-mouse-status').textContent = error.message; }
+  }
+  for (const [id, enabled] of [['enable-desktop-mouse', true], ['disable-desktop-mouse', false]]) {
+    $(id).onclick = async () => {
+      try { renderDesktopMouse(await api('/settings/mouse', {enabled})); }
+      catch (error) { $('desktop-mouse-status').textContent = error.message; }
+    };
+  }
+  $('refresh-desktop-mouse').onclick = refreshDesktopMouse;
+  refreshDesktopMouse();
+  async function refreshDial() {
+    try { renderDial(await api('/settings/dial', undefined, 'GET')); }
+    catch(error) { $('dial-status').textContent = error.message; }
+  }
+  $('refresh-dial').onclick = refreshDial;
+  $('save-dial').onclick = async () => {
+    try { renderDial(await api('/settings/dial', {enabled:$('dial-enabled').checked, friendly_name:$('dial-name').value.trim()})); }
+    catch(error) { $('dial-status').textContent = error.message; }
+  };
+  refreshDial();
   let savedTrackPreferences = {};
   function applyPreferences(preferences) {
     savedTrackPreferences = preferences.track_preferences || {};
@@ -486,6 +537,7 @@
     } catch (_) {}
   }
   function renderFlatpakAccess(platform) {
+    $('touchpad-heading').textContent = 'Host touchpad';
     $('flatpak-host-settings').classList.toggle('hidden', !platform.flatpak);
     $('autostart-settings').classList.toggle('hidden', !platform.flatpak);
     if (platform.flatpak) refreshAutostart();
@@ -828,6 +880,14 @@
   $('clear-autoplay-error').onclick = async () => {
     try { await api('/autoplay/error/clear'); await refresh(); } catch (error) { message(error.message); }
   };
+  $('repeat-video').onchange = async () => {
+    try { await api('/repeat', {enabled:$('repeat-video').checked}); await refresh(); }
+    catch(error) { message(error.message); await refresh(); }
+  };
+  $('repeat-playlist').onchange = async () => {
+    try { await api('/repeat_playlist', {enabled:$('repeat-playlist').checked}); await refresh(); }
+    catch(error) { message(error.message); await refresh(); }
+  };
   $('autoplay-toggle').onclick = async () => {
     const enabled = $('autoplay-toggle').dataset.enabled !== 'true';
     try { await api('/autoplay', {enabled}); await refresh(); }
@@ -1012,6 +1072,8 @@
       const response = await fetch('/status', {cache:'no-store'});
       if (!response.ok) throw new Error('status unavailable');
       const state = await response.json();
+      $('server-version').textContent = state.version ? `v${state.version} · ${state.server_build || 'unknown build'}` : 'Unversioned server';
+      $('server-version').title = 'Running server version and source fingerprint (excludes packaging and runtime)';
       renderTracks(state);
       const steam = state.steam || {};
       $('steam-summary').textContent = steam.active ? `Steam · ${steam.phase}` : 'Steam session';
@@ -1023,7 +1085,7 @@
         : 'Steam is ready to launch.');
       $('connection').textContent = 'Connected';
       $('title').textContent = state.title || state.current || 'Nothing playing';
-      $('playback-state').textContent = state.playback_state || 'idle';
+      $('playback-state').textContent = state.playback_state === 'loading' ? 'Loading video…' : state.playback_state || 'idle';
       const isPlaying = state.playback_state === 'playing';
       $('play-toggle').disabled = !state.current;
       $('play-toggle').dataset.control = isPlaying ? 'pause' : state.playback_state === 'paused' ? 'resume' : 'play_pause';
@@ -1033,6 +1095,10 @@
       $('pause-icon').classList.toggle('hidden', !isPlaying);
       $('hardware-decoder').textContent = state.hardware_decoder ? `Video decoder: ${state.hardware_decoder}` : '';
       $('browser-controls-note').classList.toggle('hidden', Boolean(state.hardware_decoder) || !state.current);
+      $('repeat-video').checked = Boolean(state.repeat_enabled);
+      $('repeat-video').disabled = !state.current || !state.can_seek;
+      $('repeat-playlist').checked = Boolean(state.repeat_playlist_enabled);
+      $('repeat-playlist').disabled = !state.current;
       $('autoplay-toggle').dataset.enabled = state.autoplay_enabled ? 'true' : 'false';
       $('autoplay-toggle').textContent = state.autoplay_enabled ? 'Disable autoplay' : 'Enable autoplay';
       $('autoplay-state').textContent = state.autoplay_enabled

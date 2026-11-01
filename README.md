@@ -77,6 +77,8 @@ curl -X POST http://127.0.0.1:8765/pause
 
 The [HTTP API reference](API.md) covers playback, batch queues, metadata/history, autoplay, settings, hardware decoder reporting, and the SMB provider contract. `/play` replaces the queue; `/play_preserve_queue` retains it. `/close` clears playback and the queue while keeping in-memory session history.
 
+The dashboard supports repeating a video or cycling the current queue. Experimental [DIAL](https://www.dial-multiscreen.org/overview) discovery is available in Settings. YouTube pairing starts a receiver for yt-dlp/mpv playback and phone controls; Twitch media links also use mpv, while login pages and Netflix use LibreWolf. This is not full Chromecast support; phone compatibility is still being tested. Allow UDP 1900 plus the server TCP port on the host firewall.
+
 ## Projects behind MediaBridge
 
 MediaBridge brings together these projects; thanks to their maintainers and contributors:

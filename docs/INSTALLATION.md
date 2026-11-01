@@ -14,7 +14,7 @@ Run `install-linux.sh` as the desktop user; it uses `sudo` for system dependenci
 
 The builder checks GTK 3/AppIndicator development packages and offers to install missing packages through a supported package manager. `MEDIABRIDGE_INSTALL_BUILD_DEPS=1` skips that confirmation. End users installing a release do not need a compiler. The builder uses the checked-in Cargo lockfile.
 
-The installer installs mpv, yt-dlp, Deno, playerctl, pointer/desktop tools, Python SecretStorage, and desktop/tray libraries. LibreWolf and Moonlight AppImages are downloaded from their upstream sources and extracted to avoid a FUSE requirement. No new Rust dependencies or SMB relay packages are needed for the core queue/metadata/codec changes.
+The installer installs mpv, yt-dlp, Deno, playerctl, pointer/desktop tools, Python SecretStorage, and desktop/tray libraries. LibreWolf and Moonlight AppImages are downloaded from their upstream sources and extracted to avoid a FUSE requirement. Source builds resolve Rust dependencies through Cargo.lock; release users do not need Cargo. DIAL discovery also needs UDP 1900 allowed on the host firewall.
 
 SteamOS/Bazzite need Distrobox and Podman available first. Runtime packages go inside a dedicated `mediabridge-runtime` Fedora container; the installer leaves the host image's package configuration alone. The app, user configuration, browser profile, and service stay in the user's home directory. The uninstaller only removes the container when its MediaBridge ownership marker exists.
 

@@ -9,7 +9,8 @@ mkdir -p "$fixture/source with spaces" "$fixture/bin"
 cp "$ROOT/build-flatpak.sh" "$fixture/source with spaces/"
 cp -r "$ROOT/packaging" "$fixture/source with spaces/"
 cp -r "$ROOT/web" "$fixture/source with spaces/"
-for file in Cargo.toml Cargo.lock main.rs tests.rs steam.rs steam_linux.rs steam_linux.py steam_windows.rs; do
+cp -r "$ROOT/assets" "$fixture/source with spaces/"
+for file in Cargo.toml Cargo.lock main.rs tests.rs dial.rs youtube_receiver.rs steam.rs steam_linux.rs steam_linux.py steam_windows.rs; do
   cp "$ROOT/$file" "$fixture/source with spaces/"
 done
 export FLATPAK_TEST_LOG="$fixture/calls"
@@ -65,6 +66,8 @@ case "$1" in
     test -f "$2/metadata"
     test -f "$2/files/share/applications/io.github.murasaki_dev.MediaBridge.desktop"
     ! grep -q org.freedesktop.Flatpak "$2/metadata"
+    grep -Fqx 'org.mpris.MediaPlayer2.firefox.*=own' "$2/metadata"
+    grep -Fqx 'org.mpris.MediaPlayer2.librewolf.*=own' "$2/metadata"
     ;;
   build-export)
     if [[ "$2" == --runtime ]]; then

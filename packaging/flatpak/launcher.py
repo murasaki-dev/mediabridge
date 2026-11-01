@@ -14,6 +14,7 @@ import urllib.request
 import gi
 gi.require_version("Gio", "2.0")
 from gi.repository import Gio, GLib
+from desktop_input import DesktopInput
 try:
     from gi.repository import GLibUnix
 except ImportError:
@@ -44,6 +45,7 @@ class MediaBridge(Gio.Application):
         self.background_pending = False
         self.background_started = False
         self.background_generation = 0
+        self.desktop_input = None
 
     def port(self):
         path = Path(os.environ["XDG_CONFIG_HOME"]) / "mediabridge/mediabridge.json"
@@ -64,6 +66,11 @@ class MediaBridge(Gio.Application):
                 if probe.connect_ex(("127.0.0.1", self.port())) == 0:
                     raise RuntimeError("MediaBridge's port is already in use. Stop the native service before starting the Flatpak.")
             env = os.environ.copy()
+            try:
+                self.desktop_input = DesktopInput(self.get_dbus_connection())
+                env["MEDIABRIDGE_INPUT_SOCKET"] = str(self.desktop_input.path)
+            except Exception as error:
+                print(f"Desktop input bridge unavailable: {error}", file=sys.stderr, flush=True)
             env["MEDIABRIDGE_LIBREWOLF_PROFILE"] = str(Path(env["XDG_DATA_HOME"]) / "librewolf-profile")
             env["MEDIABRIDGE_LOG_STDERR"] = "1"
             self.child = subprocess.Popen(["/app/bin/mediabridge-server"], env=env)
@@ -95,6 +102,12 @@ class MediaBridge(Gio.Application):
             return
         self.open_attempts = 0
         GLib.timeout_add(250, self.open_dashboard)
+
+    def do_shutdown(self):
+        if self.desktop_input is not None:
+            self.desktop_input.close()
+            self.desktop_input = None
+        Gio.Application.do_shutdown(self)
 
     def open_dashboard(self):
         if self.stopping or self.child is None or self.child.poll() is not None:
@@ -222,6 +235,9 @@ class MediaBridge(Gio.Application):
         if self.stopping:
             return
         self.stopping = True
+        if self.desktop_input is not None:
+            self.desktop_input.close()
+            self.desktop_input = None
         # Ask the server to clean up its players before terminating it. Steam cleanup
         # can be asynchronous, so allow a bounded grace period below.
         if self.child is not None and self.child.poll() is None:

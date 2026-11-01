@@ -28,6 +28,8 @@ use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{connect, Message, WebSocket};
 
 mod steam;
+mod dial;
+mod youtube_receiver;
 
 #[cfg(unix)]
 unsafe extern "C" { fn kill(pid: i32, signal: i32) -> i32; }
@@ -517,6 +519,16 @@ struct QueueBatchRequest {
 
 #[derive(Default)]
 struct State {
+    dial: Option<dial::Discovery>,
+    dial_app: Option<(String,u64)>,
+    youtube_receiver: Option<youtube_receiver::Lounge>,
+    youtube_receiver_feedback_at: Option<std::time::Instant>,
+    youtube_receiver_playlist: Vec<String>,
+    youtube_receiver_list_id: String,
+    repeat_enabled: bool,
+    repeat_playlist_enabled: bool,
+    repeat_playlist_requeued_epoch: Option<u64>,
+    browser_pointer: Option<(f64, f64)>,
     pending_track_preferences: Option<(TrackPreferences, std::time::Instant, std::time::Instant)>,
     close_timer_error: Option<String>,
     pending_browser_resume: Option<(f64, std::time::Instant, std::time::Instant)>,
@@ -556,6 +568,7 @@ struct State {
     autoplay_waiting_to_advance: bool,
     last_mpv_volume: Option<f64>,
     playback_error: Option<String>,
+    queue_start_retry_at: Option<std::time::Instant>,
     restart_bind: Option<String>,
     #[cfg(any(windows, target_os = "linux"))]
     librewolf_bidi: Option<LibreWolfBidi>,
@@ -579,6 +592,7 @@ struct LibreWolfBidi {
     cached_video: Option<LibreWolfVideoState>,
     autoplay_attempted: bool,
     fullscreen_attempted_at: Option<std::time::Instant>,
+    unmatched_url_reported: Option<String>,
 }
 
 #[cfg(any(windows, target_os = "linux"))]
@@ -643,6 +657,14 @@ struct AutoplayRequest {
 struct VolumeRequest { volume: f64 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RepeatRequest { enabled: bool }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DialSettingsRequest { enabled: bool, friendly_name: String }
+
+#[derive(Deserialize)]
 struct RemoteOriginsRequest { remote_origin_servers: Vec<String> }
 
 #[derive(Deserialize)]
@@ -690,7 +712,7 @@ impl From<PlaybackPreferencesRequest> for PlaybackPreferences {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct MouseRequest {
     #[serde(default)] x: i32,
     #[serde(default)] y: i32,
@@ -714,8 +736,29 @@ fn wayland_session() -> bool {
 
 fn default_app() -> String { "Desktop".into() }
 
+// Embedded sources identify the server independently of Git being installed or
+// available in a source archive. This is not a hash of the packaging/runtime.
+fn server_build() -> &'static str {
+    static BUILD: OnceLock<String> = OnceLock::new();
+    BUILD.get_or_init(|| {
+        let mut hash = Sha1::new();
+        for source in [include_str!("Cargo.toml"), include_str!("Cargo.lock"),
+            include_str!("main.rs"), include_str!("dial.rs"), include_str!("youtube_receiver.rs"), include_str!("steam.rs"),
+            include_str!("steam_linux.rs"), include_str!("steam_windows.rs"),
+            include_str!("web/index.html")] {
+            hash.update(source.replace("\r\n", "\n").as_bytes());
+            hash.update([0]);
+        }
+        format!("{:x}", hash.finalize())[..12].to_string()
+    }).as_str()
+}
+
 #[derive(Serialize)]
 struct Status {
+    version: &'static str,
+    server_build: &'static str,
+    repeat_enabled: bool,
+    repeat_playlist_enabled: bool,
     playback_epoch: u64,
     subtitle_tracks: Vec<MediaTrack>,
     audio_tracks: Vec<MediaTrack>,
@@ -776,7 +819,7 @@ struct QueueItemStatus {
 fn usage() -> &'static str {
     "mediabridge [--bind IP:PORT] [--moonlight PATH] [--moonlight-arg ARG]... [--cookies-from-browser BROWSER]\n\
      Choose browser and optional browser_args per /play or /queue request.\n\
-     If browser is omitted or unavailable, MediaBridge uses the OS default browser.\n\
+     Browser playback always uses bundled LibreWolf; system browsers are never launched.\n\
      --cookies-from-browser applies browser cookies to mpv and YouTube metadata, playlists, and Mix lookups.\n\
      Moonlight arguments may contain {host} and {app}; defaults are `stream {host} {app}`."
 }
@@ -976,7 +1019,7 @@ fn add_youtube_lookup_cookies(command: &mut Command, url: &str) -> Result<(), St
         .read().map_err(|_| "could not read playback cookie preferences")?.clone();
     if let Some(spec) = cookie_browser_spec(&preferences.cookies_browser, preferences.cookies_profile.as_deref())? {
         command.arg("--cookies-from-browser").arg(spec);
-        println!("YouTube background lookup is using the configured browser cookies");
+
     }
     Ok(())
 }
@@ -1350,53 +1393,22 @@ fn media_tool_command(name: &str) -> Command {
     command
 }
 
-fn browser_candidates(browser: &str) -> Vec<String> {
-    let executable = Path::new(browser).file_name()
-        .map(|name| name.to_string_lossy().to_lowercase())
-        .unwrap_or_else(|| browser.to_lowercase());
-    if browser.contains('/') || browser.contains('\\') {
-        return vec![browser.to_string()];
-    }
+fn browser_candidates(_browser: &str) -> Vec<String> {
     #[cfg(target_os = "linux")]
-    if executable == "librewolf" {
+    {
         let launcher = env::var_os("MEDIABRIDGE_LIBREWOLF_LAUNCHER")
             .map(PathBuf::from)
             .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/bin/mediabridge-librewolf")));
         return launcher.into_iter().map(|path| path.to_string_lossy().into_owned()).collect();
     }
     #[cfg(windows)]
-    if executable == "librewolf" {
-        let browser = env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.join("librewolf/librewolf.exe")));
-        return browser.into_iter().map(|path| path.to_string_lossy().into_owned()).collect();
+    {
+        return env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.join("librewolf/librewolf.exe")))
+            .into_iter().map(|path| path.to_string_lossy().into_owned()).collect();
     }
-    let candidates = match executable.as_str() {
-        "chromium" | "chromium-browser" => vec![browser.to_string(), "chromium".into(), "chromium-browser".into()],
-        "google-chrome" | "google-chrome-stable" => vec![browser.to_string(), "google-chrome".into(), "google-chrome-stable".into()],
-        _ => vec![browser.to_string()],
-    };
-    #[cfg(windows)]
-    let candidates = {
-        let mut candidates = candidates;
-        let locations = match executable.as_str() {
-            "chromium" | "chromium-browser" | "google-chrome" | "google-chrome-stable" => vec![
-                env::var_os("PROGRAMFILES").map(PathBuf::from).map(|p| p.join("Google/Chrome/Application/chrome.exe")),
-                env::var_os("PROGRAMFILES(X86)").map(PathBuf::from).map(|p| p.join("Google/Chrome/Application/chrome.exe")),
-                env::var_os("LOCALAPPDATA").map(PathBuf::from).map(|p| p.join("Google/Chrome/Application/chrome.exe")),
-            ],
-            "firefox" => vec![
-                env::var_os("PROGRAMFILES").map(PathBuf::from).map(|p| p.join("Mozilla Firefox/firefox.exe")),
-                env::var_os("PROGRAMFILES(X86)").map(PathBuf::from).map(|p| p.join("Mozilla Firefox/firefox.exe")),
-            ],
-            _ => Vec::new(),
-        };
-        let installed = locations.into_iter().flatten().filter(|path| path.is_file())
-            .map(|path| path.to_string_lossy().into_owned()).collect::<Vec<_>>();
-        candidates.splice(0..0, installed);
-        candidates
-    };
-    candidates
+    #[cfg(not(any(windows, target_os = "linux")))]
+    Vec::new()
 }
-
 fn chromium_name(browser: &str) -> bool {
     let name = Path::new(browser).file_name().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
     ["chromium", "chromium-browser", "chromium.exe", "google-chrome", "google-chrome-stable", "chrome.exe"].contains(&name.as_str())
@@ -1488,7 +1500,7 @@ fn safe_media_url(input: &str) -> String {
         let (query, tail) = query_and_tail.split_once('#').unwrap_or((query_and_tail, ""));
         let filtered = query.split('&').filter(|part| {
             let key = part.split('=').next().unwrap_or("").to_ascii_lowercase();
-            !["token", "access_token", "api_key", "apikey", "password", "passwd", "secret", "signature", "sig", "auth", "credential", "session"].iter().any(|s| key == *s || key.contains(s))
+            !["token", "access_token", "api_key", "apikey", "password", "passwd", "secret", "signature", "sig", "auth", "credential", "session", "pairingcode", "pairing_code"].iter().any(|s| key == *s || key.contains(s))
         }).collect::<Vec<_>>().join("&");
         if !filtered.is_empty() { output.push('?'); output.push_str(&filtered); }
         if !tail.is_empty() { output.push('#'); output.push_str(tail); }
@@ -1652,10 +1664,21 @@ fn drain_metadata(state: &mut State) {
     let results: Vec<(String, Result<serde_json::Value, String>)> = state.metadata_rx.as_ref()
         .map(|receiver| receiver.try_iter().collect()).unwrap_or_default();
     for (url, result) in results {
+        let deferred = state.metadata_in_flight_url.as_deref() == Some(&url)
+            && state.metadata_cancel.as_ref().is_some_and(|cancel| cancel.load(Ordering::Acquire));
         if state.metadata_in_flight_url.as_deref() == Some(&url) {
             state.metadata_in_flight = false;
             state.metadata_cancel = None;
             state.metadata_in_flight_url = None;
+        }
+        if deferred && result.is_err() {
+            // Playback preempted this lookup. Retry it later without presenting
+            // an intentional cancellation as a metadata failure.
+            let pending=if state.current.as_ref().is_some_and(|item|same_media_url(&item.url,&url)) {
+                &mut state.pending_metadata
+            }else{&mut state.pending_queue_metadata};
+            if !pending.contains(&url){pending.push_front(url);}
+            continue;
         }
         match result {
             Ok(metadata) => {
@@ -1682,6 +1705,10 @@ fn drain_metadata(state: &mut State) {
 
 fn dispatch_pending_metadata(state: &mut State) {
     if state.metadata_in_flight { return; }
+    if state.pending_metadata.is_empty() && state.pending_queue_metadata.is_empty(){return;}
+    // Queue/history metadata is lower priority too: it must not compete with
+    // mpv's extractor while a new file is opening.
+    if mpv_startup_in_progress(state){return;}
     // Let mpv finish opening its stream before running another yt-dlp process;
     // otherwise metadata extraction competes with the playback extractor.
     let current_candidate = state.pending_metadata.front().cloned();
@@ -1741,11 +1768,10 @@ fn drain_autoplay_results(state: &mut State) {
                     if added >= 20 { break; }
                 }
                 if let Some(id) = youtube_video_id(&seed) { state.autoplay_checked_ids.insert(id); }
-                if added > 0 { state.autoplay_phase = "queued".into(); state.autoplay_error = None; println!("Added {added} YouTube Mix videos after {}", safe_media_url(&seed)); }
+                if added > 0 { state.autoplay_phase = "queued".into(); state.autoplay_error = None;  }
                 else {
                     state.autoplay_phase = "searching".into();
                     state.autoplay_error = None;
-                    eprintln!("YouTube Mix for {} had no new available videos", safe_media_url(&seed));
                 }
             }
             Err(error) => {
@@ -1754,7 +1780,7 @@ fn drain_autoplay_results(state: &mut State) {
                     state.autoplay_phase = "searching".into();
                     state.autoplay_error = None;
                     state.autoplay_requested_seed = None;
-                    println!("No usable Mix for {}; checking the next eligible queued video", safe_media_url(&seed));
+
                     continue;
                 }
                 state.autoplay_phase = "failed".into();
@@ -1797,7 +1823,7 @@ fn request_autoplay_mix(state: &mut State, seed: String) {
     state.autoplay_cancel = Some(cancel.clone());
     state.autoplay_generation = state.autoplay_generation.wrapping_add(1);
     let generation = state.autoplay_generation;
-    println!("Starting YouTube Mix lookup for {} (request {generation})", safe_media_url(&seed));
+
     thread::spawn(move || { let result = expand_youtube_mix_cancellable(&seed, &cancel); let _ = tx.send((generation, seed, result)); });
 }
 
@@ -1868,6 +1894,11 @@ fn current_playback_started(state: &mut State) -> bool {
         return run_playerctl(&player, &["status"]).is_ok_and(|status| status.trim().eq_ignore_ascii_case("playing"));
     }
     false
+}
+
+fn mpv_startup_in_progress(state:&State)->bool {
+    state.playback_error.is_none() && state.current.as_ref().is_some_and(|item|item.local_playback)
+        && state.mpv_socket.as_deref().is_some_and(|socket|mpv_property(socket,"time-pos").and_then(|value|value.as_f64()).is_none())
 }
 
 fn isolate_process_group(command: &mut Command) {
@@ -2045,8 +2076,9 @@ fn set_youtube_interface(item: &mut QueueItem) -> Result<(), String> {
     match item.youtube_mode.to_ascii_lowercase().as_str() {
         "regular" => {
             if youtube_tv_url(&item.url) {
-                let id = youtube_video_id(&item.url).ok_or("could not extract a video ID from the YouTube TV URL")?;
-                item.url = format!("https://www.youtube.com/watch?v={id}");
+                if let Some(id) = youtube_video_id(&item.url) {
+                    item.url = format!("https://www.youtube.com/watch?v={id}");
+                }
             }
             Ok(())
         }
@@ -2111,10 +2143,44 @@ fn librewolf_bidi_session() -> Result<LibreWolfBidi, String> {
             .map_err(|error| format!("could not set a timeout for LibreWolf BiDi: {error}"))?;
     }
     let mut bidi = LibreWolfBidi { socket, next_id: 0, context_id: None, cached_at: None,
-        cached_video: None, autoplay_attempted: false, fullscreen_attempted_at: None };
+        cached_video: None, autoplay_attempted: false, fullscreen_attempted_at: None,
+        unmatched_url_reported: None };
     bidi.call("session.new", serde_json::json!({"capabilities": {}}))?;
     Ok(bidi)
 }
+
+const YOUTUBE_FULLSCREEN_SCRIPT: &str = r#"(async () => {
+  const v=document.querySelector('video');
+  const p=document.querySelector('.html5-video-player')||v;
+  if (!v || !p) return JSON.stringify({fullscreen:false,error:'video not ready'});
+  try {
+    if (!document.fullscreenElement) await p.requestFullscreen();
+    const f=document.fullscreenElement;
+    return JSON.stringify({fullscreen:!!f && (f===p || f===v || f.contains(v))});
+  } catch(e) { return JSON.stringify({fullscreen:false,error:String(e)}); }
+})()"#;
+
+const BROWSER_VOLUME_SCRIPT: &str = r#"(operation, value) => {
+  const v=document.querySelector('video');
+  if (!v) throw Error('video unavailable');
+  const current=v.muted?0:v.volume;
+  const target=Math.max(0,Math.min(1,operation==='volume'?value:current+(operation==='volume_up'?0.05:-0.05)));
+  const p=document.querySelector('.html5-video-player');
+  if (typeof p?.setVolume==='function') p.setVolume(target*100);
+  if (target>0 && typeof p?.unMute==='function') p.unMute();
+  v.volume=target;
+  if (target>0) v.muted=false;
+  return JSON.stringify({volume:v.muted?0:v.volume});
+}"#;
+
+const BROWSER_REPEAT_SCRIPT: &str = r#"(async () => {
+  const v=document.querySelector('video');
+  if (!v) throw Error('video unavailable');
+  v.currentTime=0;
+  window.__mediabridgeVideoEnded=false;
+  await v.play();
+  return JSON.stringify({restarted:true});
+})()"#;
 
 #[cfg(any(windows, target_os = "linux"))]
 impl LibreWolfBidi {
@@ -2161,6 +2227,16 @@ impl LibreWolfBidi {
             if youtube_url(url) || twitch_url(url) { None }
             else { contexts.iter().find(|(_, candidate, _)| same_website_host(url, candidate)) }
         }).map(|(id, _, window)| (id.clone(), window.clone()));
+        if selected.is_none() {
+            if self.unmatched_url_reported.as_deref() != Some(url) {
+                eprintln!("LibreWolf playback tab not found for {}", safe_media_url(url));
+                self.unmatched_url_reported = Some(url.to_string());
+            }
+        } else {
+            if self.unmatched_url_reported.take().is_some() {
+
+            }
+        }
         if let Some((id, window)) = selected.as_ref() {
             if self.context_id.as_deref() != Some(id.as_str()) {
                 if let Some(window) = window {
@@ -2185,8 +2261,12 @@ impl LibreWolfBidi {
     }
 
     fn evaluate(&mut self, context: &str, expression: &str) -> Result<serde_json::Value, String> {
+        self.evaluate_activation(context, expression, false)
+    }
+
+    fn evaluate_activation(&mut self, context: &str, expression: &str, user_activation: bool) -> Result<serde_json::Value, String> {
         let result = self.call("script.evaluate", serde_json::json!({
-            "expression": expression, "target": {"context": context}, "awaitPromise": true, "resultOwnership": "none"
+            "expression": expression, "target": {"context": context}, "awaitPromise": true, "resultOwnership": "none", "userActivation": user_activation
         }))?;
         if result.get("type").and_then(|value| value.as_str()) == Some("exception") {
             return Err("LibreWolf could not evaluate the active video page".into());
@@ -2216,14 +2296,14 @@ impl LibreWolfBidi {
             [...document.querySelectorAll('button,[role="button"],[aria-label],[title]')].find(e=>/full.?screen|expand/i.test((e.getAttribute('aria-label')||'')+' '+(e.getAttribute('title')||'')));
           const r=b?.getBoundingClientRect();
           const f=document.fullscreenElement;
-          const embeddedFullscreen=!!f && (f===v || !!v?.contains(f) || f===player || !!player?.contains(f) || !!player?.classList.contains('ytp-fullscreen'));
+          const embeddedFullscreen=(!!f && (f===v || (!!v && f.contains(v)) || f===player)) || !!player?.classList.contains('ytp-fullscreen');
           if (v && !v.__mediabridgeEndHook) {
             v.__mediabridgeEndHook=true;
             v.addEventListener('ended',()=>window.__mediabridgeVideoEnded=true);
             v.addEventListener('playing',()=>window.__mediabridgeVideoEnded=false);
           }
           return JSON.stringify({title:document.title,url:location.href,currentTime:v?.currentTime,duration:v?.duration,
-            volume:v?.volume,paused:v?.paused,ended:!!v?.ended || !!window.__mediabridgeVideoEnded,embeddedFullscreen,
+            volume:v?.muted?0:v?.volume,paused:v?.paused,ended:!!v?.ended || !!window.__mediabridgeVideoEnded,embeddedFullscreen,
             hasVideo:!!v,button:r&&r.width&&r.height?{x:r.x+r.width/2,y:r.y+r.height/2}:null});
         })()"#;
         let value = self.evaluate(&context, STATE_SCRIPT)?;
@@ -2239,7 +2319,13 @@ impl LibreWolfBidi {
             // Generic sites get one attempt once a video or fullscreen control appears.
             // YouTube and Twitch retain their existing retry behavior.
             if !supported_fullscreen { self.fullscreen_attempted_at = Some(std::time::Instant::now()); }
-            let attempted = if let Some(button) = value.get("button") {
+            let attempted = if youtube_url(url) && value.get("hasVideo").and_then(|v| v.as_bool()) == Some(true) {
+                let result = self.evaluate_activation(&context, YOUTUBE_FULLSCREEN_SCRIPT, true)?;
+                if result.get("fullscreen").and_then(|v|v.as_bool()) != Some(true) {
+                    eprintln!("YouTube fullscreen request was not confirmed: {}", result);
+                }
+                true
+            } else if let Some(button) = value.get("button") {
                 if let (Some(x), Some(y)) = (button.get("x").and_then(|value| value.as_f64()), button.get("y").and_then(|value| value.as_f64())) {
                     self.call("input.performActions", serde_json::json!({"context":context,"actions":[{"type":"pointer","id":"mediabridge-mouse","actions":[{"type":"pointerMove","x":x,"y":y,"duration":250},{"type":"pointerDown","button":0},{"type":"pointerUp","button":0}]}]})).is_ok()
                 } else { false }
@@ -2281,6 +2367,18 @@ impl LibreWolfBidi {
         Ok(())
     }
 
+    fn navigate_playback(&mut self, url: &str) -> Result<(), String> {
+        let context = self.context_id.as_ref().ok_or("LibreWolf playback tab is unavailable")?.clone();
+        self.call("browsingContext.navigate", serde_json::json!({"context":context,"url":url,"wait":"none"}))?;
+        self.context_id = None;
+        self.cached_at = None;
+        self.cached_video = None;
+        self.autoplay_attempted = false;
+        self.fullscreen_attempted_at = None;
+        self.unmatched_url_reported = None;
+        Ok(())
+    }
+
     fn close_browser(&mut self) -> Result<(), String> {
         self.call("browser.close", serde_json::json!({}))?;
         self.context_id = None;
@@ -2299,7 +2397,10 @@ fn refresh_librewolf_video(state: &mut State) -> Option<LibreWolfVideoState> {
         if state.librewolf_bidi_retry_at.is_some_and(|retry| retry > std::time::Instant::now()) { return None; }
         state.librewolf_bidi_retry_at = Some(std::time::Instant::now() + Duration::from_secs(3));
         match librewolf_bidi_session() {
-            Ok(session) => { state.librewolf_bidi = Some(session); state.librewolf_bidi_retry_at = None; }
+            Ok(session) => {
+
+                state.librewolf_bidi = Some(session); state.librewolf_bidi_retry_at = None;
+            }
             Err(error) => { eprintln!("LibreWolf playback controls are unavailable: {error}"); return None; }
         }
     }
@@ -2352,6 +2453,13 @@ fn control_librewolf(state: &mut State, operation: &str, value: Option<f64>) -> 
     if video_state.get("hasVideo").and_then(|value| value.as_bool()) != Some(true) {
         return Err("the active LibreWolf page does not expose a controllable HTML video".into());
     }
+    if matches!(operation, "volume" | "volume_up" | "volume_down") {
+        let expression = format!("({BROWSER_VOLUME_SCRIPT})({}, {})", serde_json::to_string(operation).unwrap(), value.unwrap_or(0.0));
+        let result = bidi.evaluate_activation(&context, &expression, true)?;
+        if result.get("volume").and_then(|v|v.as_f64()).is_none() { return Err("browser did not confirm video volume".into()); }
+        bidi.cached_at = None;
+        return Ok(());
+    }
     let expression = match operation {
         "pause" => "(() => { const v=document.querySelector('video'); if (!v) throw Error('video unavailable'); v.pause(); return 'ok'; })()".to_string(),
         "resume" => "(() => { const v=document.querySelector('video'); if (!v) throw Error('video unavailable'); v.play(); return 'ok'; })()".to_string(),
@@ -2359,9 +2467,6 @@ fn control_librewolf(state: &mut State, operation: &str, value: Option<f64>) -> 
         "rewind" => "(() => { const v=document.querySelector('video'); if (!v) throw Error('video unavailable'); v.currentTime=Math.max(0,v.currentTime-5); return 'ok'; })()".to_string(),
         "forward" => "(() => { const v=document.querySelector('video'); if (!v) throw Error('video unavailable'); v.currentTime=Math.min(v.duration||Infinity,v.currentTime+5); return 'ok'; })()".to_string(),
         "seek" => format!("(() => {{ const v=document.querySelector('video'); if (!v) throw Error('video unavailable'); v.currentTime={}; return 'ok'; }})()", value.ok_or("seek position is missing")?),
-        "volume" => format!("(() => {{ const v=document.querySelector('video'); if (!v) throw Error('video unavailable'); v.volume={}; return 'ok'; }})()", value.ok_or("volume is missing")?.clamp(0.0, 1.0)),
-        "volume_up" => "(() => { const v=document.querySelector('video'); if (!v) throw Error('video unavailable'); v.volume=Math.min(1,v.volume+0.05); return 'ok'; })()".to_string(),
-        "volume_down" => "(() => { const v=document.querySelector('video'); if (!v) throw Error('video unavailable'); v.volume=Math.max(0,v.volume-0.05); return 'ok'; })()".to_string(),
         _ => return Err(format!("invalid browser control operation '{operation}'")),
     };
     let _ = bidi.evaluate(&context, &expression)?;
@@ -2475,7 +2580,7 @@ fn automate_youtube(profile: &Path) -> Result<(), String> {
         thread::sleep(Duration::from_millis(250));
     };
     let ws_url = loopback_websocket_url(&ws_url, port)?;
-    println!("Using YouTube DevTools endpoint {ws_url}");
+
     let (mut socket, _) = connect(&ws_url).map_err(|e| format!("could not connect to YouTube DevTools endpoint {ws_url}: {e}"))?;
     let mut id = 0;
     id += 1;
@@ -2492,7 +2597,7 @@ fn automate_youtube(profile: &Path) -> Result<(), String> {
         if std::time::Instant::now() >= deadline { return Err("YouTube page loaded, but its video did not become ready".into()); }
         thread::sleep(Duration::from_millis(400));
     };
-    println!("Verified YouTube video page and ready video: {}", state.get("url").and_then(|v| v.as_str()).unwrap_or(&page_url));
+
     if state.get("paused").and_then(|v| v.as_bool()).unwrap_or(true) {
         let point = state.get("play").filter(|p| !p.is_null()).ok_or("video is paused, but no visible YouTube play control was found; leaving the page untouched")?.clone();
         click_youtube_control(&mut socket, &mut id, &point)?;
@@ -2503,12 +2608,10 @@ fn automate_youtube(profile: &Path) -> Result<(), String> {
             if std::time::Instant::now() >= deadline { return Err("clicked YouTube's visible play control but could not confirm playback".into()); }
             thread::sleep(Duration::from_millis(200));
         }
-        println!("Confirmed YouTube video is playing");
-    } else {
-        println!("YouTube video was already playing");
+
     }
     if !state.get("isFullscreen").and_then(|v| v.as_bool()).unwrap_or(false) {
-        println!("Trying YouTube's F fullscreen shortcut");
+
         press_youtube_fullscreen_shortcut(&mut socket, &mut id)?;
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         let mut fullscreen = false;
@@ -2528,9 +2631,7 @@ fn automate_youtube(profile: &Path) -> Result<(), String> {
                 thread::sleep(Duration::from_millis(200));
             }
         }
-        println!("Confirmed YouTube video is fullscreen");
-    } else {
-        println!("YouTube video was already fullscreen");
+
     }
     Ok(())
 }
@@ -2567,7 +2668,7 @@ fn automate_youtube_guest(profile: &Path) -> Result<(), String> {
         thread::sleep(Duration::from_millis(200));
     };
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    let (ws_url, page_url) = loop {
+    let (ws_url, _page_url) = loop {
         let targets = local_http_json(port, "/json/list")?;
         if let Some(page) = targets.as_array().and_then(|pages| pages.iter().find(|p| {
             p.get("type").and_then(|v| v.as_str()) == Some("page") &&
@@ -2582,7 +2683,7 @@ fn automate_youtube_guest(profile: &Path) -> Result<(), String> {
         thread::sleep(Duration::from_millis(250));
     };
     let ws_url = loopback_websocket_url(&ws_url, port)?;
-    println!("Using YouTube TV DevTools endpoint {ws_url}");
+
     let (mut socket, _) = connect(&ws_url).map_err(|e| format!("could not connect to YouTube TV DevTools endpoint {ws_url}: {e}"))?;
     let mut id = 0;
     id += 1;
@@ -2597,19 +2698,19 @@ fn automate_youtube_guest(profile: &Path) -> Result<(), String> {
         }
         if state.get("guest").is_some_and(|g| !g.is_null()) { break; }
         if std::time::Instant::now() >= deadline {
-            println!("No visible 'Watch as guest' control on YouTube TV; no input was sent (page: {page_url})");
+
             return Ok(());
         }
         thread::sleep(Duration::from_millis(300));
     }
     let guest = state.get("guest").cloned().ok_or("guest control disappeared before selection")?;
-    println!("Found visible YouTube TV control '{}'; selecting guest playback", guest.get("label").and_then(|v| v.as_str()).unwrap_or("Watch as guest"));
+
     click_youtube_control(&mut socket, &mut id, &guest)?;
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         state = youtube_guest_state(&mut socket, &mut id)?;
         if state.get("guest").map_or(true, serde_json::Value::is_null) {
-            println!("YouTube TV guest selection completed");
+
             return Ok(());
         }
         if std::time::Instant::now() >= deadline { return Err("clicked the visible guest control but it remained on screen".into()); }
@@ -2667,7 +2768,7 @@ fn automate_twitch_theater(profile: &Path) -> Result<(), String> {
         thread::sleep(Duration::from_millis(250));
     };
     let ws_url = loopback_websocket_url(&ws_url, port)?;
-    println!("Using Twitch DevTools endpoint {ws_url}");
+
     let (mut socket, _) = connect(&ws_url).map_err(|e| format!("could not connect to Twitch DevTools endpoint {ws_url}: {e}"))?;
     let mut id = 0;
     id += 1;
@@ -2683,7 +2784,7 @@ fn automate_twitch_theater(profile: &Path) -> Result<(), String> {
             return Err(format!("active page is not Twitch: {}", state.get("host").and_then(|v| v.as_str()).unwrap_or("unknown host")));
         }
         if state.get("active").and_then(|v| v.as_bool()) == Some(true) {
-            println!("Twitch is already in theater mode");
+
             return Ok(());
         }
         if state.get("videoReady").and_then(|v| v.as_i64()).unwrap_or(-1) >= 2 { break; }
@@ -2704,19 +2805,19 @@ fn automate_twitch_theater(profile: &Path) -> Result<(), String> {
         id += 1;
         cdp_call(&mut socket, id, "Input.dispatchMouseEvent", serde_json::json!({"type":"mouseMoved","x":x,"y":y}))?;
     }
-    println!("Twitch stream is ready; waiting briefly for player controls to settle");
+
     thread::sleep(Duration::from_millis(1200));
-    println!("Sending desktop Alt+T for Twitch theater mode");
+
     press_twitch_theater_shortcut()?;
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
         state = twitch_theater_state(&mut socket, &mut id)?;
         if state.get("active").and_then(|v| v.as_bool()) == Some(true) {
-            println!("Confirmed Twitch theater mode");
+
             return Ok(());
         }
         if std::time::Instant::now() >= deadline {
-            println!("Sent Twitch Alt+T, but could not verify theater mode from the player control state");
+
             return Ok(());
         }
         thread::sleep(Duration::from_millis(300));
@@ -2821,7 +2922,7 @@ fn smb_private_playback_url(url: &str, credentials: &serde_json::Value, port: u1
         let prefix = format!("http://127.0.0.1:{port}/api/internal/smb-media/");
         let capability = playback_url.strip_prefix(&prefix).ok_or("invalid SMB relay URL")?;
         if capability.len() != 64 || !capability.bytes().all(|byte| byte.is_ascii_hexdigit()) { return Err("invalid SMB relay capability".into()); }
-        println!("SMB playback: using seekable loopback relay");
+
         return Ok(playback_url.to_string());
     }
     let username = credentials.get("username").and_then(|value| value.as_str()).ok_or("SMB username is missing")?;
@@ -2862,16 +2963,12 @@ fn watch_mpv_output(output: impl Read + Send + 'static, epoch: u64, error_tx: Se
     thread::spawn(move || {
         let mut reported = false;
         let mut smb_reports = HashSet::new();
-        let started = std::time::Instant::now();
+
         for line in BufReader::new(output).lines() {
             let Ok(line) = line else { break; };
-            // FFmpeg may print the authenticated URL. Keep error categories,
-            // but never forward raw player output for authenticated SMB.
-            if !private_smb { eprintln!("{line}"); }
+            // Report actionable errors without forwarding raw player diagnostics or private URLs.
             if private_smb {
-                if line.contains("Exiting... (End of file)") {
-                    println!("SMB player attempt {epoch}: reached end of file after {:.1}s", started.elapsed().as_secs_f64());
-                }
+
                 if let Some(message) = smb_playback_error_from_line(&line) {
                     if smb_reports.insert(message) { eprintln!("SMB player: {message}"); }
                     // Prefer a specific cause over a later generic open failure.
@@ -2925,7 +3022,8 @@ const MPV_OSD_DURATION_MS: i64 = 1200;
 fn mpv_osd_options() -> Vec<String> {
     vec!["--osd-level=1".into(), format!("--osd-duration={MPV_OSD_DURATION_MS}"),
         "--osd-on-seek=msg-bar".into(), "--osd-playing-msg=${media-title}".into(),
-        "--osd-playing-msg-duration=2000".into()]
+        "--osd-playing-msg-duration=2000".into(),
+        "--osd-msg1=${!time-pos:Loading video...}${?paused-for-cache==yes:Buffering... ${cache-buffering-state}%}".into()]
 }
 
 fn brief_osd_text(text: &str) -> String {
@@ -2948,7 +3046,14 @@ fn track_feedback(subtitles: bool, track: Option<&MediaTrack>) -> String {
     }
 }
 
+fn apply_browser_default(item: &mut QueueItem) {
+    if !item.local_playback { item.browser = Some("librewolf".into()); }
+}
+
 fn start_url(state: &mut State, cfg: &Config, mut item: QueueItem) -> Result<(), String> {
+    state.repeat_enabled = false;
+    state.repeat_playlist_requeued_epoch = None;
+    state.browser_pointer = None;
     state.playback_epoch = state.playback_epoch.wrapping_add(1);
     state.pending_track_preferences = None;
     let resume_position = item.start_position_seconds.unwrap_or(0.0);
@@ -2956,6 +3061,8 @@ fn start_url(state: &mut State, cfg: &Config, mut item: QueueItem) -> Result<(),
     state.pending_browser_resume = None;
     state.autoplay_waiting_to_advance = false;
     let preferences = current_playback_preferences(cfg);
+    // Keep all browser playback in the bundled, controllable LibreWolf profile.
+    apply_browser_default(&mut item);
     if !item.local_playback { set_youtube_interface(&mut item)?; }
     let is_youtube = youtube_url(&item.url);
     let is_youtube_tv = youtube_tv_url(&item.url);
@@ -2971,7 +3078,10 @@ fn start_url(state: &mut State, cfg: &Config, mut item: QueueItem) -> Result<(),
             let socket = mpv_socket_path();
             let _ = std::fs::remove_file(&socket);
             let mut args = vec![
-                "--fullscreen".to_string(), "--force-window=yes".to_string(),
+                // Initialize the window/VO while the ytdl hook resolves the URL,
+                // rather than adding that work after extraction completes.
+                "--fullscreen".to_string(), "--force-window=immediate".to_string(),
+                "--loop-file=no".to_string(),
                 // mpv.conf can request a minimized window; force it visible for
                 // links opened by the background tray server.
                 "--window-minimized=no".to_string(),
@@ -2995,7 +3105,7 @@ fn start_url(state: &mut State, cfg: &Config, mut item: QueueItem) -> Result<(),
                 args.push(format!("--alang={language}"));
             }
             if item.url.get(..6).is_some_and(|scheme| scheme.eq_ignore_ascii_case("smb://")) {
-                println!("Starting SMB playback from {resume_position}: {} (account={}, attempt={})", safe_media_url(&item.url), item.smb_share_id.is_some(), state.playback_epoch);
+
             }
             args.extend(mpv_start_options(&item.url, item.start_position_seconds));
             let cookie_browser = match cookie_browser_spec(&preferences.cookies_browser, preferences.cookies_profile.as_deref()) {
@@ -3006,7 +3116,7 @@ fn start_url(state: &mut State, cfg: &Config, mut item: QueueItem) -> Result<(),
                 if browser.contains(',') || browser.contains('\n') || browser.contains('\r') {
                     return Err("cookie browser setting must not contain commas or line breaks".into());
                 }
-                println!("Using local yt-dlp cookies from browser profile '{browser}' for mpv playback");
+
                 let mut raw_options = format!("remote-components=ejs:github,cookies-from-browser={browser}");
                 let subtitles = item.subtitles.unwrap_or(preferences.subtitles);
                 if !subtitles { raw_options.push_str(",sub-langs=none"); }
@@ -3037,11 +3147,12 @@ fn start_url(state: &mut State, cfg: &Config, mut item: QueueItem) -> Result<(),
             } else { args.push(item.url.clone()); }
             let mut command = media_tool_command("mpv");
             command.args(args).stdin(if smb_playback_url.is_some() { Stdio::piped() } else { Stdio::null() }).stderr(Stdio::piped());
-            if smb_playback_url.is_some() { command.stdout(Stdio::piped()); }
+            command.stdout(Stdio::piped());
             add_deno_to_path(&mut command);
             isolate_process_group(&mut command);
             let mut child = command.spawn()
                 .map_err(|e| format!("could not start mpv; install mpv and yt-dlp: {e}"))?;
+            if let Some(cancel)=state.metadata_cancel.as_ref(){cancel.store(true,Ordering::Release);}
             if let Some(url) = smb_playback_url.as_deref() {
                 let write_result = child.stdin.take().ok_or_else(|| "private SMB player input is unavailable".to_string())
                     .and_then(|mut input| writeln!(input, "#EXTM3U\n{url}").map_err(|_| "could not send SMB credentials to the player".to_string()));
@@ -3056,7 +3167,7 @@ fn start_url(state: &mut State, cfg: &Config, mut item: QueueItem) -> Result<(),
                 watch_mpv_output(stderr, state.playback_epoch, error_tx, smb_playback_url.is_some());
             }
             if let (Some(stdout), Some(error_tx)) = (child.stdout.take(), state.player_error_tx.clone()) {
-                watch_mpv_output(stdout, state.playback_epoch, error_tx, true);
+                watch_mpv_output(stdout, state.playback_epoch, error_tx, smb_playback_url.is_some());
             }
             println!("Launched mpv for {}", safe_media_url(&item.url));
             mpv_socket = Some(socket);
@@ -3086,7 +3197,15 @@ fn start_url(state: &mut State, cfg: &Config, mut item: QueueItem) -> Result<(),
         let template = if item.browser_args.is_empty() { defaults } else { item.browser_args.clone() };
         let mut args = expand(&template, &item.url, "{url}");
         if !template.iter().any(|a| a.contains("{url}")) { args.push(item.url.clone()); }
+        let mut reused = false;
+        #[cfg(any(windows, target_os = "linux"))]
+        if let Some(bidi) = state.librewolf_bidi.as_mut().filter(|bidi| bidi.context_id.is_some()) {
+            bidi.navigate_playback(&item.url)?;
+            println!("Navigated managed LibreWolf to {}", safe_media_url(&item.url));
+            reused = true;
+        }
         let mut launched = None;
+        if !reused {
         for candidate in browser_candidates(&browser) {
             let profile = if (youtube_url(&item.url) || twitch_theater) && chromium_name(&candidate) {
                 Some(chromium_profile()?)
@@ -3125,9 +3244,6 @@ fn start_url(state: &mut State, cfg: &Config, mut item: QueueItem) -> Result<(),
                         thread::spawn(move || restore_librewolf_window(process_id, display));
                     }
                     println!("Launched browser '{}' for {}", candidate, safe_media_url(&item.url));
-                    if let Some(profile) = profile.as_ref() {
-                        println!("Waiting for Chromium DevTools on 127.0.0.1:{}", chromium_debug_port(profile)?);
-                    }
                     item.browser = Some(candidate);
                     automation_profile = profile;
                     launched = Some(child);
@@ -3138,20 +3254,11 @@ fn start_url(state: &mut State, cfg: &Config, mut item: QueueItem) -> Result<(),
             }
         }
         if launched.is_none() {
-            eprintln!("browser '{}' was not found (tried {:?}); using the OS default browser", browser, browser_candidates(&browser));
-            item.browser = None;
+            return Err("bundled LibreWolf was not found; repair the MediaBridge installation".into());
+        }
         }
         launched
-    } else { None };
-    if child.is_none() {
-        let mut opener = open_url_default(&item.url)?;
-        println!("Opened {} with the OS default browser", safe_media_url(&item.url));
-        thread::spawn(move || match opener.wait() {
-            Ok(status) if status.success() => println!("default browser launcher completed successfully"),
-            Ok(status) => eprintln!("default browser launcher exited with {status}"),
-            Err(error) => eprintln!("could not wait for the default browser launcher: {error}"),
-        });
-    }
+    } else { return Err("browser playback requires bundled LibreWolf".into()); };
     #[cfg(any(windows, target_os = "linux"))]
     let player_child = if item.browser.as_deref().is_some_and(|browser| browser.to_ascii_lowercase().contains("librewolf")) {
         // LibreWolf forwards URLs to its existing single-instance process and
@@ -3183,28 +3290,116 @@ fn start_url(state: &mut State, cfg: &Config, mut item: QueueItem) -> Result<(),
     }
     if let Some(profile) = automation_profile {
         if is_youtube_tv && youtube_guest {
-            println!("YouTube TV guest fallback is enabled; waiting for its visible guest control");
+
             thread::spawn(move || if let Err(error) = automate_youtube_guest(&profile) {
                 eprintln!("YouTube TV guest selection stopped safely: {error}");
             });
         } else if is_youtube && !is_youtube_tv {
-            println!("Starting YouTube page verification and player controls");
+
             thread::spawn(move || if let Err(error) = automate_youtube(&profile) {
                 eprintln!("YouTube automation stopped safely: {error}");
             });
         } else if is_youtube_tv {
-            println!("Opened experimental YouTube TV/Leanback interface; guest selection is disabled (set youtube_guest=true to enable it)");
+
         } else if twitch_theater {
-            println!("Starting Twitch theater-mode verification");
+
             thread::spawn(move || if let Err(error) = automate_twitch_theater(&profile) {
                 eprintln!("Twitch theater automation stopped safely: {error}");
             });
         }
     } else if is_youtube_tv {
-        println!("Opened the experimental YouTube TV/Leanback interface; standard-page automation is skipped");
+
     } else if twitch_theater {
-        println!("Twitch theater automation requires Chromium to be selected as the browser");
+
     }
+    Ok(())
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+fn close_finished_librewolf(state: &mut State) -> bool {
+    let Some(bidi) = state.librewolf_bidi.as_mut() else { return false; };
+    match bidi.close_browser() {
+        Ok(()) => {
+            state.librewolf_bidi = None;
+            true
+        }
+        Err(error) => {
+            eprintln!("Could not close LibreWolf after playback ended: {error}");
+            state.playback_error = Some(format!("Could not close LibreWolf after playback ended: {error}"));
+            false
+        }
+    }
+}
+
+fn start_front_queued_with(state: &mut State, start: impl FnOnce(&mut State, QueueItem) -> Result<(), String>) -> bool {
+    if state.queue_start_retry_at.is_some_and(|retry| retry > std::time::Instant::now()) { return false; }
+    let Some(item) = state.queue.front().cloned() else { return false; };
+    let previous = state.current.clone();
+    let previous_epoch = state.playback_epoch;
+    let previous_requeued_epoch = state.repeat_playlist_requeued_epoch;
+    match start(state, item) {
+        Ok(()) => {
+            state.queue_start_retry_at = None;
+            state.playback_error = None;
+            state.queue.pop_front();
+            if let Some(previous) = previous { push_history(state, previous); }
+            true
+        }
+        Err(error) => {
+            state.playback_epoch = previous_epoch;
+            state.repeat_playlist_requeued_epoch = previous_requeued_epoch;
+            state.queue_start_retry_at = Some(std::time::Instant::now() + Duration::from_secs(3));
+            state.current = previous;
+            eprintln!("Queued playback could not start; item retained: {error}");
+            state.playback_error = Some(format!("Queued playback could not start; item retained: {error}"));
+            false
+        }
+    }
+}
+
+fn set_repeat(state: &mut State, enabled: bool) -> Result<(), String> {
+    if enabled && state.current.is_none() { return Err("no current video to repeat".into()); }
+    if let Some(socket) = state.mpv_socket.as_deref() {
+        mpv_ipc(socket, serde_json::json!(["set_property", "loop-file", if enabled { "inf" } else { "no" }]))?;
+        show_mpv_feedback(socket, if enabled { "Repeat video: on" } else { "Repeat video: off" });
+    } else if enabled {
+        let status = media_status(state);
+        if !status.can_seek { return Err("current browser video must be seekable to repeat".into()); }
+    }
+    state.repeat_enabled = enabled;
+    if enabled { state.repeat_playlist_enabled = false; }
+    Ok(())
+}
+
+fn set_repeat_playlist(state: &mut State, enabled: bool) -> Result<(),String> {
+    if enabled && state.current.is_none() { return Err("no current playlist to repeat".into()); }
+    if enabled && state.repeat_enabled { set_repeat(state,false)?; }
+    if state.repeat_playlist_enabled!=enabled { state.repeat_playlist_requeued_epoch=None; }
+    state.repeat_playlist_enabled=enabled;
+    if let Some(socket)=state.mpv_socket.as_deref() {
+        show_mpv_feedback(socket,if enabled {"Repeat playlist: on"}else{"Repeat playlist: off"});
+    }
+    Ok(())
+}
+
+fn requeue_completed_playlist_item(state: &mut State) {
+    if !state.repeat_playlist_enabled || state.repeat_playlist_requeued_epoch==Some(state.playback_epoch) { return; }
+    if let Some(mut item)=state.current.clone() {
+        item.start_position_seconds=None;
+        item.autoplay_generated=false;
+        state.queue.push_back(item);
+        state.repeat_playlist_requeued_epoch=Some(state.playback_epoch);
+    }
+}
+
+#[cfg(any(windows, target_os="linux"))]
+fn repeat_browser_video(state: &mut State) -> Result<(),String> {
+    let bidi=state.librewolf_bidi.as_mut().ok_or("LibreWolf controls are unavailable")?;
+    let context=bidi.context_id.clone().ok_or("LibreWolf playback tab is unavailable")?;
+    let result=bidi.evaluate_activation(&context,BROWSER_REPEAT_SCRIPT,true)?;
+    if result["restarted"].as_bool()!=Some(true) { return Err("browser did not confirm repeat playback".into()); }
+    bidi.cached_at=None;
+    bidi.cached_video=None;
     Ok(())
 }
 
@@ -3231,25 +3426,34 @@ fn advance(state: &mut State, cfg: &Config) {
         if let (Some(item), Some(bidi)) = (state.current.as_ref(), state.librewolf_bidi.as_mut()) {
             let _ = bidi.set_youtube_autoplay(&item.url, false);
         }
-        if ended {
-            if let Some(item) = state.queue.pop_front() {
-                if let Some(current) = state.current.take() { push_history(state, current); }
-                if let Some(bidi) = state.librewolf_bidi.as_mut() { let _ = bidi.close_playback(); }
-                if let Err(error) = start_url(state, cfg, item.clone()) {
-                    eprintln!("failed to start queued URL {}: {error}", safe_media_url(&item.url));
-                }
+        if ended && state.repeat_enabled {
+            if let Err(error) = repeat_browser_video(state) {
+                state.repeat_enabled = false;
+                state.playback_error = Some(format!("Could not repeat browser video: {error}"));
+            }
+        } else if ended {
+            requeue_completed_playlist_item(state);
+            if !state.queue.is_empty() {
+                if !start_front_queued_with(state, |state, item| {
+                    if item.local_playback {
+                        if let Some(bidi) = state.librewolf_bidi.as_mut() { bidi.close_playback()?; }
+                    }
+                    start_url(state, cfg, item)
+                }) {state.autoplay_waiting_to_advance=true;}
             } else if state.autoplay_enabled {
                 if let Some(seed) = state.current.as_ref().filter(|item| youtube_url(&item.url)).map(|item| item.url.clone()) {
                     request_autoplay_mix(state, seed);
                 }
                 if state.autoplay_in_flight.is_some() { state.autoplay_waiting_to_advance = true; }
                 else {
-                    if let Some(bidi) = state.librewolf_bidi.as_mut() { let _ = bidi.close_playback(); }
-                    if let Some(item) = state.current.take() { push_history(state, item); }
+                    if close_finished_librewolf(state) {
+                        if let Some(item) = state.current.take() { push_history(state, item); }
+                    }
                 }
             } else {
-                if let Some(bidi) = state.librewolf_bidi.as_mut() { let _ = bidi.close_playback(); }
-                if let Some(item) = state.current.take() { push_history(state, item); }
+                if close_finished_librewolf(state) {
+                    if let Some(item) = state.current.take() { push_history(state, item); }
+                }
             }
         }
     }
@@ -3263,8 +3467,9 @@ fn advance(state: &mut State, cfg: &Config) {
             None => break,
         };
         let Some(exit) = exit else { break; };
+        if exit.as_ref().is_ok_and(|status| status.success()) { requeue_completed_playlist_item(state); }
         match exit {
-            Ok(status) if status.success() => println!("Playback process exited successfully"),
+            Ok(status) if status.success() => {},
             Ok(status) => {
                 let player = if state.current.as_ref().is_some_and(|item| item.local_playback) { "mpv" } else { "browser" };
                 let message = format!("{player} playback process exited with {status}");
@@ -3288,30 +3493,47 @@ fn advance(state: &mut State, cfg: &Config) {
                 break;
             }
         }
-        if let Some(item) = state.current.take() { push_history(state, item); }
-        match state.queue.pop_front() {
-            Some(item) => if let Err(error) = start_url(state, cfg, item.clone()) { eprintln!("failed to start queued URL {}: {error}", safe_media_url(&item.url)); },
-            None => break,
+        if state.queue.is_empty() {
+            if let Some(item) = state.current.take() { push_history(state, item); }
+            break;
+        }
+        if !start_front_queued_with(state, |state, item| start_url(state, cfg, item)) {
+            state.autoplay_waiting_to_advance = true;
+            break;
         }
     }
     drain_autoplay_results(state);
     dispatch_autoplay_mix(state);
     if state.autoplay_waiting_to_advance {
-        if let Some(item) = state.queue.pop_front() {
-            if let Some(current) = state.current.take() { push_history(state, current); }
-            state.autoplay_waiting_to_advance = false;
-            #[cfg(any(windows, target_os = "linux"))]
-            if let Some(bidi) = state.librewolf_bidi.as_mut() { let _ = bidi.close_playback(); }
-            if let Err(error) = start_url(state, cfg, item.clone()) { eprintln!("failed to start autoplay video {}: {error}", safe_media_url(&item.url)); }
+        if !state.queue.is_empty() {
+            if start_front_queued_with(state, |state, item| {
+                #[cfg(any(windows, target_os = "linux"))]
+                if item.local_playback {
+                    if let Some(bidi) = state.librewolf_bidi.as_mut() { bidi.close_playback()?; }
+                }
+                start_url(state, cfg, item)
+            }) { state.autoplay_waiting_to_advance = false; }
         } else if state.autoplay_in_flight.is_none() || !state.autoplay_enabled {
             #[cfg(any(windows, target_os = "linux"))]
-            if let Some(bidi) = state.librewolf_bidi.as_mut() { let _ = bidi.close_playback(); }
+            if state.librewolf_bidi.is_some() && !close_finished_librewolf(state) { return; }
             if let Some(current) = state.current.take() { push_history(state, current); }
             state.autoplay_waiting_to_advance = false;
         }
     }
     dispatch_pending_metadata(state);
-    if state.mirror.as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(Some(_)) | Err(_))) { state.mirror = None; }
+    if let Some(child)=state.mirror.as_mut() {
+        match child.try_wait() {
+            Ok(Some(status))=>{
+                if !status.success(){
+                    let error=format!("Moonlight exited with {status}; check the server log for its startup error");
+                    eprintln!("{error}");state.playback_error=Some(error);
+                }
+                state.mirror=None;
+            }
+            Err(error)=>{state.playback_error=Some(format!("Could not check Moonlight: {error}"));state.mirror=None;}
+            Ok(None)=>{},
+        }
+    }
 }
 
 fn push_history(state: &mut State, item: QueueItem) {
@@ -3329,6 +3551,13 @@ fn interrupted_item(current: &QueueItem, status: &Status) -> Result<QueueItem, S
 }
 
 fn stop_current(state: &mut State) -> Result<(), String> {
+    state.youtube_receiver = None;
+    state.youtube_receiver_feedback_at = None;
+    state.repeat_enabled = false;
+    state.repeat_playlist_enabled = false;
+    state.repeat_playlist_requeued_epoch = None;
+    state.browser_pointer = None;
+    state.queue_start_retry_at = None;
     state.pending_track_preferences = None;
     state.pending_browser_resume = None;
     let mut close_error = None;
@@ -3406,11 +3635,6 @@ fn run_playerctl(player: &str, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-#[cfg(windows)]
-fn open_url_default(url: &str) -> Result<Child, String> {
-    Command::new("explorer.exe").arg(url).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
-        .spawn().map_err(|e| format!("could not open URL with the Windows default browser: {e}"))
-}
 
 #[cfg(windows)]
 fn open_dashboard_in_librewolf(url: &str) -> Result<Child, String> {
@@ -3426,11 +3650,6 @@ fn open_dashboard_in_librewolf(url: &str) -> Result<Child, String> {
         .spawn().map_err(|error| format!("could not open the dashboard in bundled LibreWolf: {error}"))
 }
 
-#[cfg(not(windows))]
-fn open_url_default(url: &str) -> Result<Child, String> {
-    Command::new("xdg-open").arg(url).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
-        .spawn().map_err(|e| format!("could not open URL with xdg-open: {e}"))
-}
 
 #[cfg(target_os = "linux")]
 fn open_dashboard_in_librewolf(url: &str) -> Result<Child, String> {
@@ -3467,11 +3686,9 @@ fn open_librewolf_sign_in(url: &str) -> Result<Child, String> {
     if !launcher.is_file() {
         return Err(format!("MediaBridge LibreWolf launcher was not found at {}", launcher.display()));
     }
-    eprintln!("Starting LibreWolf sign-in using {}", launcher.display());
     let child = Command::new(&launcher).env("MEDIABRIDGE_LIBREWOLF_NO_BIDI", "1").arg(url)
         .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::inherit())
         .spawn().map_err(|error| format!("could not open sign-in in bundled LibreWolf: {error}"))?;
-    eprintln!("LibreWolf sign-in launcher started with pid {}", child.id());
     Ok(child)
 }
 
@@ -3683,6 +3900,64 @@ fn send_windows_browser_key(key: u16) -> Result<(), String> {
     Ok(())
 }
 
+fn browser_mouse_actions(request: &MouseRequest, previous: Option<(f64,f64)>, width: f64, height: f64) -> Result<(serde_json::Value,(f64,f64)),String> {
+    if !width.is_finite() || !height.is_finite() || width<1.0 || height<1.0 { return Err("browser viewport is unavailable".into()); }
+    let button = match request.button.as_str() { "left"=>0, "middle"=>1, "right"=>2, _=>return Err("mouse button must be left, middle, or right".into()) };
+    let mut position=previous.unwrap_or((width/2.0,height/2.0));
+    match request.action.as_str() {
+        "move"|"click" => {
+            if !(0..=32767).contains(&request.x) || !(0..=32767).contains(&request.y) { return Err("mouse x and y must be between 0 and 32767".into()); }
+            position=(f64::from(request.x)/32767.0*(width-1.0), f64::from(request.y)/32767.0*(height-1.0));
+        }
+        "move_relative" => {
+            if !(-32767..=32767).contains(&request.dx) || !(-32767..=32767).contains(&request.dy) { return Err("mouse dx and dy must be between -32767 and 32767".into()); }
+            position.0+=f64::from(request.dx); position.1+=f64::from(request.dy);
+        }
+        "click_current"=>{},
+        _=>return Err("unsupported browser mouse action".into()),
+    }
+    position=(position.0.clamp(0.0,width-1.0),position.1.clamp(0.0,height-1.0));
+    let mut actions=vec![serde_json::json!({"type":"pointerMove","x":position.0.round() as i64,"y":position.1.round() as i64,"duration":16})];
+    if matches!(request.action.as_str(),"click"|"click_current") {
+        actions.push(serde_json::json!({"type":"pointerDown","button":button}));
+        actions.push(serde_json::json!({"type":"pointerUp","button":button}));
+    }
+    Ok((serde_json::json!([{"type":"pointer","id":"mediabridge-touchpad","actions":actions}]),position))
+}
+
+fn run_mouse_for_state(state: &mut State, request: MouseRequest) -> Result<(),String> {
+    #[cfg(target_os="linux")]
+    if env::var_os("FLATPAK_ID").is_some() {
+        desktop_input_call(serde_json::json!({"operation":"mouse","request":request}))?;
+        return Ok(());
+    }
+    let _=state;
+    run_mouse(request)
+}
+
+fn desktop_input_call(value: serde_json::Value) -> Result<serde_json::Value, String> {
+    #[cfg(target_os="linux")]
+    {
+        use std::os::unix::net::UnixStream;
+        let path=env::var_os("MEDIABRIDGE_INPUT_SOCKET").ok_or("Desktop input bridge unavailable; restart the updated Flatpak from the app launcher")?;
+        let mut stream=UnixStream::connect(path).map_err(|e|format!("Desktop input bridge unavailable: {e}"))?;
+        stream.set_read_timeout(Some(Duration::from_secs(5))).map_err(|e|e.to_string())?;
+        stream.set_write_timeout(Some(Duration::from_secs(5))).map_err(|e|e.to_string())?;
+        stream.write_all(format!("{value}\n").as_bytes()).map_err(|e|e.to_string())?;
+        stream.shutdown(std::net::Shutdown::Write).map_err(|e|e.to_string())?;
+        let mut response=String::new();
+        stream.take(8192).read_to_string(&mut response).map_err(|e|e.to_string())?;
+        let result:serde_json::Value=serde_json::from_str(&response).map_err(|e|e.to_string())?;
+        if let Some(error)=result["error"].as_str() {
+            // Status can report an earlier error while remaining a valid response.
+            if result.get("supported").is_none(){return Err(error.to_string());}
+        }
+        Ok(result)
+    }
+    #[cfg(not(target_os="linux"))]
+    { let _=value; Err("Desktop portal control is available in the Linux Flatpak only".into()) }
+}
+
 fn run_mouse(request: MouseRequest) -> Result<(), String> {
     let absolute = request.action == "move" || request.action == "click";
     let relative = request.action == "move_relative";
@@ -3707,7 +3982,7 @@ fn run_mouse(request: MouseRequest) -> Result<(), String> {
         _ => return Err("mouse button must be 'left', 'right', or 'middle'".into()),
     };
     let wayland = wayland_session();
-    println!("Sending mouse input through {}", if wayland { "ydotool (Wayland)" } else { "xdotool (X11)" });
+
     let (program, args): (&str, Vec<String>) = if wayland {
         let mut args = if absolute { vec!["mousemove".into(), "--absolute".into(), "-x".into(), request.x.to_string(), "-y".into(), request.y.to_string()] }
             else if relative { vec!["mousemove".into(), "-x".into(), request.dx.to_string(), "-y".into(), request.dy.to_string()] }
@@ -3871,8 +4146,13 @@ fn media_status(state: &mut State) -> Status {
                     .map(|decoder| if decoder == "no" { "software".to_string() } else { decoder })
                     .unwrap_or_else(|| "checking".to_string()),
             );
-            let playback_state = match paused { Some(true) => "paused", Some(false) => "playing", None => "unknown" }.to_string();
+            let playback_state = if position_seconds.is_none() && state.playback_error.is_none(){"loading"}
+                else {match paused {Some(true)=>"paused",Some(false)=>"playing",None=>"unknown"}}.to_string();
             return Status {
+                version: env!("CARGO_PKG_VERSION"),
+                server_build: server_build(),
+                repeat_enabled: state.repeat_enabled,
+                repeat_playlist_enabled: state.repeat_playlist_enabled,
                 playback_epoch: state.playback_epoch,
                 subtitle_tracks: tracks.as_ref().map(|tracks| media_tracks(tracks,"sub")).unwrap_or_default(),
                 audio_tracks: tracks.as_ref().map(|tracks| media_tracks(tracks,"audio")).unwrap_or_default(),
@@ -3931,6 +4211,10 @@ fn media_status(state: &mut State) -> Status {
         else if state.current.is_some() { "unknown".into() }
         else { "idle".into() };
     Status {
+        version: env!("CARGO_PKG_VERSION"),
+        server_build: server_build(),
+        repeat_enabled: state.repeat_enabled && state.current.is_some(),
+        repeat_playlist_enabled: state.repeat_playlist_enabled,
         playback_epoch: state.playback_epoch, subtitle_tracks: Vec::new(), audio_tracks: Vec::new(), tracks_available: false,
         close_at_epoch_ms: close_timer_expiration_epoch_ms(state),
         close_remaining_seconds: state.close_deadline.map(|deadline| deadline.saturating_duration_since(std::time::Instant::now()).as_secs_f64()),
@@ -4067,9 +4351,134 @@ fn autostart_status() -> serde_json::Value {
     })
 }
 
+fn dial_response(request:Request,status:u16,body:String,headers:Vec<(&str,String)>) {
+    let mut response=Response::from_string(body).with_status_code(StatusCode(status));
+    for (key,value) in headers {if let Ok(header)=Header::from_bytes(key,value){response=response.with_header(header);}}
+    let _=request.respond(response);
+}
+
+fn chromium_dial_origin(origin:&str)->bool {
+    // Chromium DialURLFetcher: package:<product>.<major version>.<OS>.
+    // Accept its native DIAL origin, not arbitrary package origins or URLs.
+    let Some(package)=origin.strip_prefix("package:") else{return false;};
+    let parts:Vec<_>=package.split('.').collect();
+    parts.len()==3 && matches!(parts[0],"Google-Chrome"|"Chromium")
+        && !parts[1].is_empty() && parts[1].len()<=5 && parts[1].bytes().all(|c|c.is_ascii_digit())
+        && !parts[2].is_empty() && parts[2].len()<=40 && parts[2].bytes().all(|c|c.is_ascii_alphanumeric()||c==b'-')
+}
+
+fn dial_origin_allowed(origin:&str,app:Option<&str>)->bool {
+    // Android YouTube sends its package origin even when fetching device.xml.
+    // Keep this exception exact and confined to DIAL discovery/YouTube routes.
+    if origin == "package:com.google.android.youtube" {
+        return app.is_none_or(|app| app == "YouTube");
+    }
+    if chromium_dial_origin(origin){return app.is_none_or(|app|dial::APPS.contains(&app));}
+    if remote_origin_allowed(origin){return true;}
+    let Ok(uri)=origin.parse::<tungstenite::http::Uri>() else{return false;};
+    if uri.scheme_str()!=Some("https"){return false;}
+    let host=uri.host().unwrap_or("").to_ascii_lowercase();
+    let belongs=|app:&str| match app {
+        "YouTube"=>host=="youtube.com"||host.ends_with(".youtube.com"),
+        "Twitch"=>host=="twitch.tv"||host.ends_with(".twitch.tv"),
+        "Netflix"=>host=="netflix.com"||host.ends_with(".netflix.com"),_=>false,
+    };
+    app.map(belongs).unwrap_or_else(||dial::APPS.iter().any(|app|belongs(app)))
+}
+
+fn handle_dial(mut request:Request,cfg:&Config,state:&mut State) {
+    let path=request.url().split('?').next().unwrap_or("").trim_end_matches('/').to_string();
+    let method=request.method().clone();
+    let parts=path.strip_prefix("/dial/apps/").map(|part|part.split('/').collect::<Vec<_>>());
+    let app=parts.as_ref().and_then(|parts|parts.first()).copied();
+    let origin=request.headers().iter().find(|h|h.field.equiv("Origin")).map(|h|h.value.as_str().to_string());
+    if origin.as_deref().is_some_and(|origin|!dial_origin_allowed(origin,app)) {
+        dial_response(request,403,"origin is not allowed".into(),vec![]);return;
+    }
+    let mut headers=vec![("Content-Type","text/xml; charset=utf-8".into()),("Cache-Control","no-store".into())];
+    if let Some(origin)=origin {headers.extend([("Access-Control-Allow-Origin",origin),("Vary","Origin".into()),
+        ("Access-Control-Allow-Methods","GET, POST, DELETE, OPTIONS".into()),("Access-Control-Allow-Headers","Content-Type".into()),
+        ("Access-Control-Expose-Headers","Application-URL, Location".into())]);}
+    let Some(discovery)=state.dial.as_ref() else {dial_response(request,503,"DIAL is unavailable".into(),headers);return;};
+    let settings=discovery.settings();
+    if !settings.enabled {dial_response(request,503,"DIAL is disabled".into(),headers);return;}
+    if method==Method::Options {dial_response(request,204,String::new(),headers);return;}
+    let bind=match cfg.bind.parse::<SocketAddr>() {Ok(bind)=>bind,Err(_)=>{dial_response(request,503,"DIAL requires an IP bind address".into(),headers);return;}};
+    let peer=request.remote_addr().copied().unwrap_or(SocketAddr::from(([127,0,0,1],1)));
+    let base=match dial::base_url(bind,peer){Ok(base)=>base,Err(error)=>{dial_response(request,503,error,headers);return;}};
+    if method==Method::Get && path=="/dial/device.xml" {
+        headers.push(("Application-URL",format!("{base}/dial/apps/")));
+        dial_response(request,200,dial::device_xml(&settings),headers);return;
+    }
+    let Some(app)=app.filter(|app|dial::APPS.contains(app)) else {dial_response(request,404,"unknown DIAL application".into(),headers);return;};
+    let parts=parts.unwrap();
+    if parts.len()>2 || (parts.len()==2 && parts[1]!="run") {dial_response(request,404,String::new(),headers);return;}
+    let running=if app=="YouTube" && state.youtube_receiver.is_some() {
+        state.youtube_receiver.as_ref().is_some_and(|receiver|receiver.running())
+    } else {state.dial_app.as_ref().is_some_and(|(active,epoch)|active==app&&*epoch==state.playback_epoch&&state.current.is_some())};
+    if method==Method::Get && parts.len()==1 {dial_response(request,200,dial::app_xml(app,running),headers);return;}
+    if method==Method::Delete && parts.len()==2 {
+        if !running {dial_response(request,404,String::new(),headers);return;}
+        set_autoplay(state,false,None);
+        match stop_current(state) {
+            Ok(())=>{state.dial_app=None;dial_response(request,200,String::new(),headers);}
+            Err(error)=>dial_response(request,500,error,headers),
+        }
+        return;
+    }
+    if method!=Method::Post {dial_response(request,405,String::new(),headers);return;}
+    let mut payload=String::new();
+    if request.as_reader().take(8193).read_to_string(&mut payload).is_err() || payload.len()>8192 {
+        dial_response(request,413,"invalid or oversized DIAL payload".into(),headers);return;
+    }
+    if app == "YouTube" {
+        match dial::pairing_code(&payload) {
+            Err(error) => {dial_response(request,422,error,headers);return;}
+            Ok(Some(code)) => {
+                if let Err(error)=stop_current(state) {dial_response(request,503,error,headers);return;}
+                state.queue.clear();
+                set_autoplay(state,false,None);
+                state.youtube_receiver_playlist.clear();
+                state.youtube_receiver_list_id.clear();
+                state.youtube_receiver=Some(youtube_receiver::Lounge::start(code,settings.friendly_name,settings.uuid));
+                state.dial.as_mut().unwrap().record(app,&payload,"YouTube receiver pairing requested");
+                headers.push(("Location",format!("{base}/dial/apps/YouTube/run")));
+                dial_response(request,201,String::new(),headers);return;
+            }
+            Ok(None)=>{},
+        }
+    }
+    let launch=match dial::launch(app,&payload) {
+        Ok(launch)=>launch,
+        Err(error)=>{state.dial.as_mut().unwrap().record(app,&payload,"unsupported launch data");
+
+            dial_response(request,422,error,headers);return;}
+    };
+    let mut item:QueueItem=serde_json::from_value(serde_json::json!({"url":launch.url,"local":launch.local,"browser":"librewolf"})).unwrap();
+    if !launch.local {item.title=Some(format!("{app} browser receiver"));}
+    // Preserve the TV pairing URL instead of converting it into a regular video.
+    if !launch.local && app=="YouTube" {item.youtube_mode="regular".into();}
+    let previous=state.current.clone();
+    if let Err(error)=stop_current(state) {dial_response(request,503,error,headers);return;}
+    if let Some(previous)=previous {push_history(state,previous);}
+    state.playback_error=None;
+    let mode=if item.local_playback{"media via yt-dlp/mpv"}else{"managed browser login/app"};
+    match start_url(state,cfg,item) {
+        Ok(())=>{
+            state.dial_app=Some((app.to_string(),state.playback_epoch));
+            state.dial.as_mut().unwrap().record(app,&payload,mode);
+
+            headers.push(("Location",format!("{base}/dial/apps/{app}/run")));
+            dial_response(request,201,String::new(),headers);
+        }
+        Err(error)=>{state.dial.as_mut().unwrap().record(app,&payload,"launch failed");state.playback_error=Some(error.clone());dial_response(request,503,error,headers);}
+    }
+}
+
 fn handle(mut request: Request, cfg: &Config, state: &mut State) {
     let method = request.method().clone();
     let path = request.url().split('?').next().unwrap_or("/").to_string();
+    if path.starts_with("/dial/") {handle_dial(request,cfg,state);return;}
     if let Some(origin) = request.headers().iter().find(|h| h.field.equiv("Origin")).map(|h| h.value.as_str()) {
         let local_origin = request.headers().iter().find(|h| h.field.equiv("Host"))
             .map(|h| format!("http://{}", h.value.as_str()));
@@ -4084,11 +4493,50 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         respond(request, 204, String::new(), "text/plain; charset=utf-8");
         return;
     }
-    if !(method == Method::Get && path == "/status") {
-        println!("Received {} {}", method, path);
-    }
+
     if method == Method::Get && (path == "/" || path == "/index.html") {
         respond(request, 200, include_str!("web/index.html").to_string(), "text/html; charset=utf-8"); return;
+    }
+    if method == Method::Get && matches!(path.as_str(),"/icon.png"|"/favicon.ico") {
+        let (bytes,content_type):(&[u8],&str)=if path=="/favicon.ico" {
+            (include_bytes!("assets/mediabridge.ico"),"image/vnd.microsoft.icon")
+        }else{(include_bytes!("assets/mediabridge.png"),"image/png")};
+        let response=Response::from_data(bytes.to_vec()).with_header(Header::from_bytes("Content-Type",content_type).unwrap());
+        let _=request.respond(response);return;
+    }
+    if path=="/settings/mouse" && (method==Method::Get || method==Method::Post) {
+        if env::var_os("FLATPAK_ID").is_none() {
+            respond(request,200,json(&serde_json::json!({"supported":false,"backend":"native","scope":"desktop"})),"application/json");return;
+        }
+        let operation=if method==Method::Post {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct MouseSettings { enabled: bool }
+            let mut body=String::new();
+            if request.as_reader().take(4097).read_to_string(&mut body).is_err() || body.len()>4096 {respond(request,400,"{\"error\":\"invalid mouse settings\"}".into(),"application/json");return;}
+            match serde_json::from_str::<MouseSettings>(&body) {
+                Ok(value)=>if value.enabled{"enable"}else{"disable"},
+                Err(error)=>{respond(request,400,json(&serde_json::json!({"error":error.to_string()})),"application/json");return;}
+            }
+        }else{"status"};
+        match desktop_input_call(serde_json::json!({"operation":operation})) {
+            Ok(value)=>respond(request,200,json(&value),"application/json"),
+            Err(error)=>respond(request,503,json(&serde_json::json!({"error":error})),"application/json"),
+        }
+        return;
+    }
+    if path=="/settings/dial" && (method==Method::Get || method==Method::Post) {
+        let Some(discovery)=state.dial.as_mut() else{respond(request,503,"{\"error\":\"DIAL is unavailable\"}".into(),"application/json");return;};
+        if method==Method::Post {
+            let mut body=String::new();
+            if request.as_reader().take(4097).read_to_string(&mut body).is_err()||body.len()>4096{respond(request,400,"{\"error\":\"invalid DIAL settings\"}".into(),"application/json");return;}
+            let parsed:DialSettingsRequest=match serde_json::from_str(&body){Ok(value)=>value,Err(error)=>{respond(request,400,json(&serde_json::json!({"error":error.to_string()})),"application/json");return;}};
+            if let Err(error)=discovery.update(parsed.enabled,parsed.friendly_name){respond(request,400,json(&serde_json::json!({"error":error})),"application/json");return;}
+            if !parsed.enabled { state.youtube_receiver=None; }
+        }
+        let mut status=discovery.status();
+        status["youtube_receiver"]=state.youtube_receiver.as_ref().map(|receiver|receiver.status()).unwrap_or_else(||serde_json::json!({"phase":"stopped","error":null}));
+        respond(request,200,json(&status),"application/json");return;
     }
     if method == Method::Get && path == "/preferences" {
         respond(request, 200, json(&current_playback_preferences(cfg)), "application/json"); return;
@@ -4637,6 +5085,22 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         }
         respond(request, 200, "{\"ok\":true}".into(), "application/json"); return;
     }
+    if method == Method::Post && (path == "/repeat" || path == "/repeat_playlist") {
+        let mut body = String::new();
+        if request.as_reader().take(4097).read_to_string(&mut body).is_err() || body.len()>4096 {
+            respond(request, 400, "{\"error\":\"invalid repeat request\"}".into(), "application/json"); return;
+        }
+        let parsed: RepeatRequest = match serde_json::from_str(&body) {
+            Ok(value) => value,
+            Err(error) => { respond(request,400,json(&serde_json::json!({"error":error.to_string()})),"application/json"); return; }
+        };
+        let result=if path=="/repeat_playlist" {set_repeat_playlist(state,parsed.enabled)} else {set_repeat(state,parsed.enabled)};
+        match result {
+            Ok(()) => respond(request,200,json(&serde_json::json!({"ok":true,"repeat_enabled":state.repeat_enabled,"repeat_playlist_enabled":state.repeat_playlist_enabled})),"application/json"),
+            Err(error) => respond(request,409,json(&serde_json::json!({"error":error})),"application/json"),
+        }
+        return;
+    }
     if method == Method::Post && path == "/close" {
         match close_all_playback(state) {
             Ok(closing) => respond(request, if closing { 202 } else { 200 }, json(&serde_json::json!({"ok":true,"closing":closing})), "application/json"),
@@ -4686,7 +5150,7 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         let mut body = String::new();
         if request.as_reader().read_to_string(&mut body).is_err() { respond(request, 400, "{\"error\":\"invalid body\"}".into(), "application/json"); return; }
         let parsed: MouseRequest = match serde_json::from_str(&body) { Ok(v) => v, Err(e) => { respond(request, 400, json(&serde_json::json!({"error": e.to_string()})), "application/json"); return; } };
-        match run_mouse(parsed) {
+        match run_mouse_for_state(state, parsed) {
             Ok(()) => respond(request, 200, "{\"ok\":true}".into(), "application/json"),
             Err(e) => respond(request, 400, json(&serde_json::json!({"error": e})), "application/json"),
         }
@@ -4708,6 +5172,8 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         return;
     }
     if method == Method::Post && path == "/next" {
+        let repeat_playlist = state.repeat_playlist_enabled;
+        requeue_completed_playlist_item(state);
         let next = match state.queue.pop_front() {
             Some(item) => item,
             None => { respond(request, 409, "{\"error\":\"queue is empty\"}".into(), "application/json"); return; }
@@ -4716,9 +5182,10 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         state.playback_epoch = state.playback_epoch.wrapping_add(1);
         state.playback_error = None;
         let _ = stop_current(state);
-        match start_url(state, cfg, next) {
+        state.repeat_playlist_enabled = repeat_playlist;
+        match start_url(state, cfg, next.clone()) {
             Ok(()) => respond(request, 202, "{\"ok\":true}".into(), "application/json"),
-            Err(e) => respond(request, 500, json(&serde_json::json!({"error": e})), "application/json"),
+            Err(e) => {state.queue.push_front(next);respond(request, 500, json(&serde_json::json!({"error": e})), "application/json");},
         }
         return;
     }
@@ -4741,7 +5208,7 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
                 respond(request, 409, json(&serde_json::json!({"error":"Moonlight pairing is already in progress"})), "application/json"); return;
             }
         }
-        let child = match moonlight_command(cfg).arg("pair").arg(host).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+        let child = match moonlight_command(cfg).arg("pair").arg(host).stdin(Stdio::null()).stdout(Stdio::inherit()).stderr(Stdio::inherit()).spawn() {
             Ok(child) => child,
             Err(error) => { respond(request, 500, json(&serde_json::json!({"error":format!("could not start Moonlight pairing with '{}': {error}", cfg.moonlight)})), "application/json"); return; }
         };
@@ -4766,7 +5233,7 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         let _ = stop_current(state);
         state.queue.clear();
         if let Some(mut child) = state.mirror.take() { let _ = child.kill(); let _ = child.wait(); }
-        match moonlight_command(cfg).args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+        match moonlight_command(cfg).args(args).stdin(Stdio::null()).stdout(Stdio::inherit()).stderr(Stdio::inherit()).spawn() {
             Ok(child) => { state.mirror = Some(child); respond(request, 202, "{\"ok\":true}".into(), "application/json"); }
             Err(e) => respond(request, 500, json(&serde_json::json!({"error": format!("could not start Moonlight '{}': {e}", cfg.moonlight)})), "application/json"),
         }
@@ -4807,6 +5274,143 @@ fn dashboard_url(bind: &str) -> String {
     format!("http://{}/", SocketAddr::new(ip, address.port()))
 }
 
+fn dial_settings_path()->Result<PathBuf,String> {
+    #[cfg(windows)]
+    {Ok(windows_log_path().with_file_name("dial.json"))}
+    #[cfg(not(windows))]
+    {Ok(user_config_path()?.with_file_name("dial.json"))}
+}
+
+fn receiver_string(args:&serde_json::Value,key:&str)->String {
+    args[key].as_str().map(str::to_string).unwrap_or_else(||if args[key].is_number(){args[key].to_string()}else{String::new()})
+}
+
+fn receiver_playlist(args:&serde_json::Value)->Result<(Vec<String>,usize,f64),String> {
+    let ids=receiver_string(args,"videoIds");
+    let ids=if ids.is_empty(){receiver_string(args,"videoId")}else{ids};
+    let ids:Vec<String>=ids.split(',').map(str::to_string).collect();
+    if ids.len()>500 || ids.iter().any(|id|id.len()!=11||!id.bytes().all(|c|c.is_ascii_alphanumeric()||b"_-".contains(&c))) {
+        return Err("invalid YouTube receiver playlist".into());
+    }
+    let index=receiver_string(args,"currentIndex");
+    let index=if index.is_empty(){0}else{index.parse::<usize>().map_err(|_|"invalid playlist index")?};
+    if index>=ids.len(){return Err("playlist index is out of range".into());}
+    let time=receiver_string(args,"currentTime");
+    let time=if time.is_empty(){0.0}else{time.parse::<f64>().map_err(|_|"invalid playback time")?};
+    if !time.is_finite()||time<0.0{return Err("invalid playback time".into());}
+    Ok((ids,index,time))
+}
+
+fn receiver_item(id:&str,position:f64)->QueueItem {
+    serde_json::from_value(serde_json::json!({"url":format!("https://www.youtube.com/watch?v={id}"),"local":true,"start_position_seconds":position})).unwrap()
+}
+
+// Called with the receiver temporarily detached, so internal player replacement
+// can use the ordinary stop path without disconnecting the phone's session.
+fn apply_receiver_command(state:&mut State,cfg:&Config,command:&str,args:&serde_json::Value)->Result<(),String> {
+    match command {
+        "setPlaylist"|"setVideo" => {
+            let (ids,index,time)=receiver_playlist(args)?;
+            let previous=state.current.clone();
+            stop_current(state)?;
+            if let Some(previous)=previous{push_history(state,previous);}
+            state.queue.clear();
+            state.playback_error=None;
+            start_url(state,cfg,receiver_item(&ids[index],time))?;
+            state.queue.extend(ids.iter().skip(index+1).map(|id|receiver_item(id,0.0)));
+            state.youtube_receiver_playlist=ids;
+            state.youtube_receiver_list_id=receiver_string(args,"listId");
+        }
+        "updatePlaylist" => {
+            let (ids,_,_)=receiver_playlist(args)?;
+            let current=state.current.as_ref().and_then(|item|youtube_video_id(&item.url));
+            let index=current.as_ref().and_then(|current|ids.iter().position(|id|id==current)).ok_or("updated playlist does not contain the current video")?;
+            state.queue=ids.iter().skip(index+1).map(|id|receiver_item(id,0.0)).collect();
+            state.youtube_receiver_playlist=ids;
+            state.youtube_receiver_list_id=receiver_string(args,"listId");
+        }
+        "pause"=>control_media(state,"pause",None)?,
+        "play"=>control_media(state,"resume",None)?,
+        "seekTo"=>{
+            let position=receiver_string(args,"newTime").parse::<f64>().map_err(|_|"invalid receiver seek position")?;
+            if !position.is_finite()||position<0.0{return Err("invalid receiver seek position".into());}
+            control_media(state,"seek",Some(position))?;
+        }
+        "setVolume"=>{
+            let volume=receiver_string(args,"volume");
+            let mut value=if volume.is_empty() && args.get("delta").is_some(){
+                let delta=receiver_string(args,"delta").parse::<f64>().map_err(|_|"invalid volume delta")?;
+                media_status(state).volume.unwrap_or(1.0)*100.0+delta
+            }else if volume.is_empty(){
+                state.last_mpv_volume.unwrap_or(1.0)*100.0
+            }else{volume.parse::<f64>().map_err(|_|"invalid volume")?};
+            if receiver_string(args,"muted")=="true"||args["muted"]==true{value=0.0;}
+            if !value.is_finite(){return Err("invalid volume".into());}
+            let value=value.clamp(0.0,100.0)/100.0;
+            if state.current.is_some(){control_media(state,"volume",Some(value))?;}
+            else{state.last_mpv_volume=Some(value);}
+        }
+        "stopVideo"=>{
+            set_autoplay(state,false,None);
+            state.queue.clear();state.youtube_receiver_playlist.clear();state.youtube_receiver_list_id.clear();
+            if state.current.is_some() || state.player.is_some(){stop_current(state)?;}
+        }
+        "next"|"nextVideo"=>{
+            let next=state.queue.front().cloned().ok_or("receiver queue is empty")?;
+            stop_current(state)?;
+            start_url(state,cfg,next)?;
+            state.queue.pop_front();
+        }
+        "previous"|"previousVideo"=>{
+            let id=state.current.as_ref().and_then(|item|youtube_video_id(&item.url)).ok_or("no receiver video")?;
+            let index=state.youtube_receiver_playlist.iter().position(|v|v==&id).filter(|index|*index>0).ok_or("no previous receiver video")?-1;
+            let ids=state.youtube_receiver_playlist.clone();
+            stop_current(state)?;
+            start_url(state,cfg,receiver_item(&ids[index],0.0))?;
+            state.queue=ids.iter().skip(index+1).map(|id|receiver_item(id,0.0)).collect();
+        }
+        // Queries and connection notifications trigger feedback in the poller.
+        _=>{},
+    }
+    Ok(())
+}
+
+fn poll_youtube_receiver(state:&mut State,cfg:&Config) {
+    let Some(receiver)=state.youtube_receiver.take() else{return;};
+    let mut feedback=false;
+    for (command,args) in receiver.incoming.try_iter().take(16) {
+        let manual_disconnect=receiver.received(&command,&args);
+        let action=if manual_disconnect{"stopVideo"}else{&command};
+        if let Err(error)=apply_receiver_command(state,cfg,action,&args) {
+            state.playback_error=Some(format!("YouTube receiver: {error}"));
+            receiver.send("onError",serde_json::json!({"reason":"playbackError"}));
+        }
+        if command=="updatePlaylist"{receiver.send("confirmPlaylistUpdate",serde_json::json!({"updated":"true"}));}
+        if command=="getSubtitlesTrack"{receiver.send("onSubtitlesTrackChanged",serde_json::json!({"videoId":""}));}
+        feedback=true;
+    }
+    let now=std::time::Instant::now();
+    if receiver.running() && (feedback || state.youtube_receiver_feedback_at.is_none_or(|at|now>=at)) {
+        let status=media_status(state);
+        let id=state.current.as_ref().and_then(|item|youtube_video_id(&item.url)).or_else(||state.youtube_receiver_playlist.last().cloned()).unwrap_or_default();
+        let playback=if id.is_empty(){-1}else if status.playback_error.is_some(){-1000}else if state.current.is_none(){0}else{match status.playback_state.as_str(){"paused"=>2,"playing"=>1,"ended"=>0,_=>3}};
+        let duration=status.duration_seconds.unwrap_or(0.0).max(0.0);
+        let position=status.position_seconds.unwrap_or(0.0).max(0.0);
+        let index=state.youtube_receiver_playlist.iter().position(|v|v==&id).unwrap_or(0);
+        let args=serde_json::json!({"videoId":id,"currentTime":position.to_string(),"duration":duration.to_string(),"state":playback.to_string(),
+            "seekableStartTime":"0","seekableEndTime":duration.to_string(),"currentIndex":index.to_string(),"listId":state.youtube_receiver_list_id});
+        receiver.send("nowPlaying",args.clone());
+        receiver.send("onStateChange",args.clone());
+        if feedback {
+            let mut playlist=args; playlist["videoIds"]=state.youtube_receiver_playlist.join(",").into();
+            receiver.send("nowPlayingPlaylist",playlist);
+        }
+        receiver.send("onVolumeChanged",serde_json::json!({"volume":(status.volume.or(state.last_mpv_volume).unwrap_or(1.0)*100.0).round().to_string(),"muted":"false"}));
+        state.youtube_receiver_feedback_at=Some(now+Duration::from_secs(2));
+    }
+    state.youtube_receiver=Some(receiver);
+}
+
 fn run_server(cfg: Config, shutdown: Option<Arc<AtomicBool>>) -> Result<Option<String>, String> {
     let _ = REMOTE_ORIGINS.set(RwLock::new(cfg.remote_origin_servers.clone()));
     let (cookies_browser, cookies_profile) = configured_cookie_source(&cfg);
@@ -4826,6 +5430,12 @@ fn run_server(cfg: Config, shutdown: Option<Arc<AtomicBool>>) -> Result<Option<S
     let (metadata_tx, metadata_rx) = mpsc::channel();
     let (autoplay_tx, autoplay_rx) = mpsc::channel();
     let mut state = State::default();
+    if let (Ok(path),Ok(bind))=(dial_settings_path(),cfg.bind.parse::<SocketAddr>()) {
+        match dial::Discovery::start(path,bind) {
+            Ok(discovery)=>state.dial=Some(discovery),
+            Err(error)=>eprintln!("DIAL could not initialize: {error}"),
+        }
+    }
     state.player_error_tx = Some(player_error_tx);
     state.player_error_rx = Some(player_error_rx);
     state.metadata_tx = Some(metadata_tx);
@@ -4834,6 +5444,7 @@ fn run_server(cfg: Config, shutdown: Option<Arc<AtomicBool>>) -> Result<Option<S
     state.autoplay_rx = Some(autoplay_rx);
     while !shutdown.as_ref().is_some_and(|flag| flag.load(Ordering::Acquire)) {
         advance(&mut state, &cfg);
+        poll_youtube_receiver(&mut state, &cfg);
         if let Some(request) = server.recv_timeout(Duration::from_millis(200)).unwrap_or(None) { handle(request, &cfg, &mut state); }
         else { thread::yield_now(); }
         if state.restart_bind.is_some() { break; }
@@ -4910,18 +5521,8 @@ impl winit::application::ApplicationHandler<LinuxTrayEvent> for LinuxTrayApp {
             event_loop.exit();
             return;
         }
-        let mut pixels = vec![0u8; 16 * 16 * 4];
-        for y in 2..14 {
-            for x in 2..14 {
-                let i = (y * 16 + x) * 4;
-                pixels[i..i + 4].copy_from_slice(&[35, 166, 223, 255]);
-            }
-        }
-        for (x, y) in [(6, 5), (7, 6), (8, 7), (9, 8), (8, 9), (7, 10), (6, 11)] {
-            let i = (y * 16 + x) * 4;
-            pixels[i..i + 4].copy_from_slice(&[255, 255, 255, 255]);
-        }
-        let icon = match Icon::from_rgba(pixels, 16, 16) {
+        let pixels = include_bytes!("assets/tray-32.rgba").to_vec();
+        let icon = match Icon::from_rgba(pixels, 32, 32) {
             Ok(icon) => icon,
             Err(error) => {
                 append_linux_log(format!("Could not create tray icon image: {error}"));
@@ -5120,18 +5721,8 @@ impl winit::application::ApplicationHandler<TrayUiEvent> for WindowsTrayApp {
             event_loop.exit();
             return;
         }
-        let mut pixels = vec![0u8; 16 * 16 * 4];
-        for y in 2..14 {
-            for x in 2..14 {
-                let i = (y * 16 + x) * 4;
-                pixels[i..i + 4].copy_from_slice(&[35, 166, 223, 255]);
-            }
-        }
-        for (x, y) in [(6, 5), (7, 6), (8, 7), (9, 8), (8, 9), (7, 10), (6, 11)] {
-            let i = (y * 16 + x) * 4;
-            pixels[i..i + 4].copy_from_slice(&[255, 255, 255, 255]);
-        }
-        let icon = match Icon::from_rgba(pixels, 16, 16) {
+        let pixels = include_bytes!("assets/tray-32.rgba").to_vec();
+        let icon = match Icon::from_rgba(pixels, 32, 32) {
             Ok(icon) => icon,
             Err(error) => { append_windows_log(format!("Could not create tray icon image: {error}")); event_loop.exit(); return; }
         };

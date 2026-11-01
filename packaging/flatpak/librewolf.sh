@@ -26,6 +26,8 @@ EOF
 fi
 # BiDi is required by MediaBridge's managed browser playback controls.
 if [[ "${MEDIABRIDGE_LIBREWOLF_NO_BIDI:-0}" == 1 ]]; then
-  exec /app/lib/librewolf/AppRun --no-remote --profile "$PROFILE" "$@"
+  exec /app/lib/librewolf/AppRun --profile "$PROFILE" "$@"
 fi
-exec /app/lib/librewolf/AppRun --no-remote --profile "$PROFILE" --remote-debugging-port 9222 "$@"
+# The explicit private profile isolates this browser. Allow subsequent dashboard
+# and playback launches to reuse it, as the native launcher does.
+exec /app/lib/librewolf/AppRun --profile "$PROFILE" --remote-debugging-port 9222 "$@"

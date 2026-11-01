@@ -161,9 +161,12 @@ fi
 # Allow LAN access through recognized firewalls without enabling an inactive one.
 if command -v ufw >/dev/null 2>&1 && sudo ufw status 2>/dev/null | grep -q "Status: active"; then
   sudo ufw allow 8765/tcp
+  sudo ufw allow 1900/udp
 elif command -v firewall-cmd >/dev/null 2>&1 && sudo firewall-cmd --state >/dev/null 2>&1; then
   sudo firewall-cmd --query-port=8765/tcp >/dev/null 2>&1 || sudo firewall-cmd --add-port=8765/tcp
   sudo firewall-cmd --permanent --query-port=8765/tcp >/dev/null 2>&1 || sudo firewall-cmd --permanent --add-port=8765/tcp
+  sudo firewall-cmd --query-port=1900/udp >/dev/null 2>&1 || sudo firewall-cmd --add-port=1900/udp
+  sudo firewall-cmd --permanent --query-port=1900/udp >/dev/null 2>&1 || sudo firewall-cmd --permanent --add-port=1900/udp
 fi
 
 if [[ "$PACKAGE_ONLY" -eq 1 ]]; then
@@ -363,6 +366,15 @@ if [[ ! -x "$APP_DIR/moonlight-current/squashfs-root/AppRun" ]]; then
 fi
 
 install -m 755 "$TMP_DIR/mediabridge/mediabridge" "$APP_DIR/mediabridge"
+ICON_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/512x512/apps/mediabridge.png"
+if [[ -f "$TMP_DIR/mediabridge/mediabridge.png" ]]; then
+  install -Dm644 "$TMP_DIR/mediabridge/mediabridge.png" "$ICON_FILE"
+elif [[ -f "$SCRIPT_DIR/assets/mediabridge.png" ]]; then
+  install -Dm644 "$SCRIPT_DIR/assets/mediabridge.png" "$ICON_FILE"
+else
+  mkdir -p "$(dirname -- "$ICON_FILE")"
+  curl --fail --location --silent --show-error "https://raw.githubusercontent.com/$REPOSITORY/main/assets/mediabridge.png" --output "$ICON_FILE"
+fi
 cat > "$BIN_DIR/mediabridge-librewolf" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -526,7 +538,7 @@ Type=Application
 Name=MediaBridge Dashboard
 Comment=Open the MediaBridge dashboard in its bundled LibreWolf browser
 Exec="$BIN_DIR/mediabridge-dashboard"
-Icon=multimedia-video-player
+Icon=mediabridge
 Terminal=false
 Categories=AudioVideo;Network;
 EOF
@@ -536,6 +548,7 @@ if [[ "$HAS_USER_SYSTEMD" -eq 1 ]]; then
 [Desktop Entry]
 Type=Application
 Name=MediaBridge service and tray
+Icon=mediabridge
 Exec="$BIN_DIR/mediabridge-autostart"
 Terminal=false
 X-GNOME-Autostart-enabled=true
