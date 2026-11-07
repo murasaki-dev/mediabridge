@@ -1,6 +1,44 @@
 use super::*;
 
 #[test]
+fn api_smb_credentials_are_private_and_survive_resume() {
+    let entry: QueueItem = serde_json::from_value(serde_json::json!({
+        "url":"smb://host/share/movie.mp4", "local":true,
+        "smb_credentials":{"username":"alice", "password":"private:@secret", "domain":"PC"}
+    })).unwrap();
+    assert!(validate_smb_credentials(&entry).is_ok());
+    assert_eq!(smb_authenticated_playback_url(&entry).unwrap().unwrap(),
+        "smb://PC;alice:private%3A%40secret@host/share/movie.mp4");
+    let public = serde_json::to_string(&status_items(std::iter::once(&entry))).unwrap();
+    assert!(!public.contains("private"));
+    assert!(!public.contains("credentials"));
+    let mut status = media_status(&mut State::default());
+    status.can_seek = true;
+    status.position_seconds = Some(12.0);
+    let resumed = interrupted_item(&entry, &status).unwrap();
+    assert_eq!(resumed.smb_credentials, entry.smb_credentials);
+    assert_eq!(resumed.start_position_seconds, Some(12.0));
+    let mut invalid = entry.clone();
+    invalid.url = "https://example.com/video".into();
+    assert!(validate_smb_credentials(&invalid).is_err());
+    invalid = entry.clone(); invalid.local_playback = false;
+    assert!(validate_smb_credentials(&invalid).is_err());
+    invalid = entry; invalid.smb_share_id = Some("0123456789abcdef01234567".into());
+    assert!(validate_smb_credentials(&invalid).is_err());
+}
+
+#[test]
+fn invalid_smb_credentials_do_not_echo_secrets() {
+    for credentials in [serde_json::json!({"username":"user","password":["private-secret"]}),
+        serde_json::json!({"username":"","password":"private-secret"}),
+        serde_json::json!({"username":"user","password":"private-secret","playback_url":"http://evil"})] {
+        let result = serde_json::from_value::<QueueItem>(serde_json::json!({"url":"smb://host/share/file", "local":true,"smb_credentials":credentials}));
+        let error = result.err().expect("invalid credentials must fail").to_string();
+        assert!(!error.contains("private-secret"));
+    }
+}
+
+#[test]
 fn explicit_receiver_stop_clears_playback_queue_and_autoplay() {
     let mut state=State::default();
     state.current=Some(receiver_item("abcdefghijk",0.0));
@@ -785,3 +823,4 @@ fn smb_diagnostics_do_not_echo_secrets_or_renderer_failures() {
     assert!(!message.contains("secret"));
     assert!(message.contains("sign-in"));
 }
+

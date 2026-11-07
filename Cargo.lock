@@ -1366,7 +1366,7 @@ checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
 name = "mediabridge"
-version = "1.2.6"
+version = "1.2.7"
 dependencies = [
  "gtk",
  "if-addrs",
@@ -3549,3 +3549,4 @@ name = "zmij"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
+

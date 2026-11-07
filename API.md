@@ -10,6 +10,20 @@ The default port is `8765`, but it can be changed in MediaBridge settings. The s
 
 From v1.1.0, `GET /status` includes `version` (application version, for example `"1.1.0"`) and `server_build` (12-character source fingerprint). The dashboard displays both from the running server. The fingerprint identifies embedded server/dashboard sources and Cargo dependencies, not the Flatpak runtime or installer. Older builds omit these fields.
 
+## Direct SMB credentials
+
+Playback and queue endpoints accept `smb_credentials` alongside a credential-free SMB URL:
+
+```sh
+curl -X POST http://127.0.0.1:8765/play \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"smb://fileserver/media/movie.mp4","local":true,"smb_credentials":{"username":"alice","password":"your-password","domain":"PC"}}'
+```
+
+`domain` is optional. Username must be nonempty; an empty password is allowed. Each field is limited to 4096 bytes with no NUL characters. Credentials require `local:true`, an SMB URL, and no `smb_share_id`; invalid combinations return 400 before changing playback or queues. Batch requests supply credentials per item. Credentials remain in session memory with the item for queue playback, interruption/resume, repeat, and history replay. They are never saved to disk or included in public status/history, player arguments, or raw player logs. Restarting MediaBridge clears them. New autoplay suggestions clear credentials.
+
+This signs in for the selected media through an SMB-enabled mpv build; it does not mount the share, browse directories, or add SMB support to an incompatible player. The existing API uses unencrypted HTTP without authentication, so credentials sent over the LAN travel in plaintext. Use only a trusted network or a protected tunnel. Provider-backed credentials and relay playback remain available below.
+
 ## SMB credential providers
 
 ### What a provider is, and what is included
@@ -28,7 +42,7 @@ Baka-Inu supplies its own share bookmarks, login dialogs, credential storage, ac
 
 ### Client playback requests
 
-SMB URLs stay credential-free in requests, queue state, history, and public status. Set `local:true` and an opaque 24-hex `smb_share_id` to request provider-backed playback. Without a reference, MediaBridge uses direct guest SMB. SMB metadata uses the filename. Playback disables mpv watch-later positions and starts at zero unless `start_position_seconds` specifies a saved position, including one captured by `/play_interrupt`.
+SMB URLs stay credential-free in requests, queue state, history, and public status. Direct login fields can be supplied separately as described above. Set `local:true` and an opaque 24-hex `smb_share_id` to request provider-backed playback. Without a reference, MediaBridge uses direct guest SMB. SMB metadata uses the filename. Playback disables mpv watch-later positions and starts at zero unless `start_position_seconds` specifies a saved position, including one captured by `/play_interrupt`.
 
 ```sh
 # Direct guest share, using an SMB-enabled mpv build:
@@ -195,6 +209,7 @@ curl -sS -X POST "$BASE_URL/pause"
 | `queued_by_user_id` | string | Optional opaque caller-supplied attribution; MediaBridge does not authenticate this identity. |
 | `duration_seconds` | number | Optional duration hint; successful metadata lookup retains positive finite durations. |
 | `metadata_error` | string | Last metadata lookup failure; cleared after a successful lookup. |
+| `smb_credentials` | object | Optional in-memory SMB login: `username`, `password`, optional `domain`; requires local SMB playback and cannot be combined with `smb_share_id`. |
 | `smb_share_id` | string | Optional 24-hex credential-provider reference for local SMB playback; never a password. See [SMB credential providers](#smb-credential-providers). |
 | `uploader` | string | Optional artist/uploader metadata hint. |
 | `thumbnail_url` | string | Optional thumbnail/artwork URL. |
@@ -955,3 +970,4 @@ Error bodies generally use this shape:
 ```
 
 Dashboard branding: GET /icon.png serves the application logo as PNG; GET /favicon.ico serves the multi-resolution Windows/browser icon. Both are embedded in the server, so clients do not need separate image files.
+

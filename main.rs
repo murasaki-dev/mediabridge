@@ -460,6 +460,30 @@ fn current_playback_preferences(cfg: &Config) -> PlaybackPreferences {
         })
 }
 
+fn deserialize_smb_credentials<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<serde_json::Value>, D::Error> {
+    // Value avoids reflecting secret field contents in serde type errors.
+    let value = serde_json::Value::deserialize(deserializer)?;
+    if value.is_null() { return Ok(None); }
+    let valid = value.as_object().is_some_and(|fields| {
+        fields.keys().all(|key| ["username", "password", "domain"].contains(&key.as_str()))
+            && ["username", "password"].iter().all(|key| fields.get(*key).and_then(|v| v.as_str()).is_some_and(|v| v.len() <= 4096 && !v.contains('\0')))
+            && fields.get("username").and_then(|v| v.as_str()).is_some_and(|v| !v.is_empty())
+            && fields.get("domain").is_none_or(|v| v.as_str().is_some_and(|v| v.len() <= 4096 && !v.contains('\0')))
+    });
+    if !valid { return Err(serde::de::Error::custom("invalid smb_credentials: expected username, password, and optional domain strings (up to 4096 bytes each)")); }
+    Ok(Some(value))
+}
+
+fn validate_smb_credentials(item: &QueueItem) -> Result<(), String> {
+    if item.smb_credentials.is_some() {
+        if !item.local_playback || !item.url.get(..6).is_some_and(|scheme| scheme.eq_ignore_ascii_case("smb://")) {
+            return Err("smb_credentials requires an SMB URL and local:true".into());
+        }
+        if item.smb_share_id.is_some() { return Err("use either smb_credentials or smb_share_id".into()); }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Deserialize)]
 struct QueueItem {
     url: String,
@@ -469,6 +493,8 @@ struct QueueItem {
     start_position_seconds: Option<f64>,
     #[serde(default)]
     smb_share_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_smb_credentials")]
+    smb_credentials: Option<serde_json::Value>,
     #[serde(default)]
     queued_by_user_id: Option<String>,
     #[serde(default)]
@@ -726,6 +752,7 @@ struct MouseRequest {
 fn default_mouse_button() -> String { "left".into() }
 fn default_youtube_mode() -> String { "regular".into() }
 
+#[cfg(target_os = "linux")]
 fn wayland_session() -> bool {
     match env::var("XDG_SESSION_TYPE").ok().as_deref() {
         Some("wayland") => true,
@@ -1758,6 +1785,7 @@ fn drain_autoplay_results(state: &mut State) {
                     item.queued_by_user_id = None;
                     item.start_position_seconds = None;
                     item.smb_share_id = None;
+                    item.smb_credentials = None;
                     item.metadata_error = None;
                     item.title = None; item.uploader = None; item.thumbnail_url = None; item.duration_seconds = None;
                     item.channel_avatar_url = None; item.channel_banner_url = None;
@@ -2239,9 +2267,9 @@ impl LibreWolfBidi {
         }
         if let Some((id, window)) = selected.as_ref() {
             if self.context_id.as_deref() != Some(id.as_str()) {
+                #[cfg(not(windows))]
                 if let Some(window) = window {
                     // Firefox may ignore page actions while its native window is minimized.
-                    #[cfg(not(windows))]
                     let _ = self.call("browser.setClientWindowState", serde_json::json!({"clientWindow":window,"state":"normal"}));
                 }
                 let _ = self.call("browsingContext.activate", serde_json::json!({"context":id}));
@@ -2887,6 +2915,10 @@ fn native_smb_credentials(executable: &std::ffi::OsStr, item: &QueueItem) -> Res
 // Credentials never become part of QueueItem.url. Only private player input
 // receives the authenticated URL. Providers validate the URL-to-share boundary.
 fn smb_authenticated_playback_url(item: &QueueItem) -> Result<Option<String>, String> {
+    validate_smb_credentials(item)?;
+    if let Some(credentials) = &item.smb_credentials {
+        return smb_private_playback_url(&clean_media_url(&item.url, true)?, credentials, 8081).map(Some);
+    }
     let Some(share_id) = item.smb_share_id.as_deref() else { return Ok(None); };
     if !item.url.to_ascii_lowercase().starts_with("smb://") || share_id.len() != 24 || !share_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("invalid SMB credential reference".into());
@@ -3051,6 +3083,7 @@ fn apply_browser_default(item: &mut QueueItem) {
 }
 
 fn start_url(state: &mut State, cfg: &Config, mut item: QueueItem) -> Result<(), String> {
+    validate_smb_credentials(&item)?;
     state.repeat_enabled = false;
     state.repeat_playlist_requeued_epoch = None;
     state.browser_pointer = None;
@@ -4960,6 +4993,9 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         }
         // Validate the whole selection before changing playback or the queue.
         for item in &mut parsed.items {
+            if let Err(error) = validate_smb_credentials(item) {
+                respond(request, 400, json(&serde_json::json!({"error": error})), "application/json"); return;
+            }
             if item.start_position_seconds.is_some_and(|position| !position.is_finite() || position < 0.0) {
                 respond(request, 400, "{\"error\":\"start_position_seconds must be finite and non-negative\"}".into(), "application/json"); return;
             }
@@ -4996,6 +5032,9 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         let mut body = String::new();
         if request.as_reader().read_to_string(&mut body).is_err() { respond(request, 400, "{\"error\":\"invalid body\"}".into(), "application/json"); return; }
         let mut parsed: QueueItem = match serde_json::from_str(&body) { Ok(v) => v, Err(e) => { respond(request, 400, json(&serde_json::json!({"error": e.to_string()})), "application/json"); return; } };
+        if let Err(error) = validate_smb_credentials(&parsed) {
+            respond(request, 400, json(&serde_json::json!({"error": error})), "application/json"); return;
+        }
         if parsed.start_position_seconds.is_some_and(|position| !position.is_finite() || position < 0.0) {
             respond(request, 400, "{\"error\":\"start_position_seconds must be finite and non-negative\"}".into(), "application/json"); return;
         }
@@ -5802,3 +5841,4 @@ fn main() {
         }
     }
 }
+

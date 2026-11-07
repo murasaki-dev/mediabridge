@@ -15,7 +15,7 @@ Control media on a Windows or Linux PC from another device on your LAN. MediaBri
 - Pair Moonlight with a Sunshine host and launch desktop/game streaming.
 - Open a managed Steam Big Picture session on the host, report running games, and close it while leaving Steam running. Video playback can run alongside Steam; manually opened Steam sessions stay unmanaged.
 
-Local playback starts with **720p and H.264 preferences**, with codec fallbacks and configurable hardware decoding. SMB guest playback requires an SMB-enabled mpv build; authenticated SMB or relay playback requires an external provider. Standalone MediaBridge does not include an SMB login store or file browser. See the [SMB API guide](API.md#smb-credential-providers).
+Local playback starts with **720p and H.264 preferences**, with codec fallbacks and configurable hardware decoding. SMB guest playback requires an SMB-enabled mpv build; authenticated SMB accepts credentials in API requests, while relay playback requires an external provider. Standalone MediaBridge does not include an SMB login store or file browser. See the [SMB API guide](API.md#smb-credential-providers).
 
 ## Install
 
@@ -95,3 +95,4 @@ MediaBridge brings together these projects; thanks to their maintainers and cont
 | [Rust](https://www.rust-lang.org/), [GTK](https://www.gtk.org/), and [tray-icon](https://github.com/tauri-apps/tray-icon) | Application, desktop, and tray foundations. |
 
 See [project credits](THIRD_PARTY.md) for the direct Rust libraries, Linux desktop tools, packaging tools, and optional SMB companion projects. Components retain their own licenses; the credits list is not a replacement for their license notices.
+
