@@ -144,8 +144,8 @@ Authenticated SMB playback in this standalone checkout has not been exercised en
 | Manual queue additions | Preserve generated suggestions. Ordinary additions precede the first suggestion; `/queue` with `at_end:true` appends literally last. Next-item/playlist operations preserve the rest of the queue. |
 | New playback routes | `/play_preserve_queue` replaces only current playback; `/queue_batch` adds an ordered selection. |
 | Queue/history data | Duration, metadata failure, and caller attribution are exposed; `history_items` is newest first. `/close` preserves in-memory session history. |
-| Autoplay | Immediate live candidate scan, retry cooldown, cancellation generation checks, progress/errors, and `/autoplay/error/clear`. |
-| Cookie usage | Configured browser cookies now also apply to background YouTube metadata, playlist, and Mix lookups. |
+| Autoplay | Current-video lookup, retry cooldown, cancellation generation checks, progress/errors, and `/autoplay/error/clear`. |
+| Cookie usage | Configured browser cookies now also apply to background YouTube metadata and playlist lookups. |
 | Decode/logging | Hardware decode selection/reporting, Linux stderr log mirroring, and Linux LibreWolf sign-in launcher/PID/stderr diagnostics. |
 | SMB | Provider-backed private playback, optional HTTP relay, filename metadata, explicit start/resume positions, and safe error categories. The native login store and relay remain external. |
 
@@ -215,16 +215,16 @@ curl -sS -X POST "$BASE_URL/pause"
 | `thumbnail_url` | string | Optional thumbnail/artwork URL. |
 | `channel_avatar_url` | string | Optional channel avatar URL. |
 | `channel_banner_url` | string | Optional channel banner URL. |
-| `autoplay` | boolean | Optional server autoplay switch. Enabling starts a background Mix search immediately; suggestions are appended after explicit queue entries. |
+| `autoplay` | boolean | Optional server autoplay switch. Enabling starts a background recommendation search immediately; suggestions are appended after explicit queue entries. |
 | `autoplay_minutes` | number | Legacy alias for setting the global close countdown in positive minutes, independent of `autoplay`. Decimals are accepted. Prefer `/timer` for new clients. Omission leaves an existing countdown unchanged. |
 
-`POST /autoplay` turns the server autoplay switch on or off. Send `{"enabled":true}` or `{"enabled":false}`. Autoplay has no separate expiry policy. The optional legacy `duration_minutes` field now sets the global close countdown; it does not merely stop Mix generation. Omitted/null `duration_minutes` leaves the countdown unchanged, and disabling autoplay does not cancel it. Use `/timer` to set, replace, or cancel the countdown. `GET /status` reports `autoplay_enabled`. Generated Mix entries appear in `queue_items` with `autoplay_generated:true`; new explicit entries are placed before them.
+`POST /autoplay` turns the server autoplay switch on or off. Send `{"enabled":true}` or `{"enabled":false}`. Autoplay has no separate expiry policy. The optional legacy `duration_minutes` field now sets the global close countdown; it does not merely stop recommendation generation. Omitted/null `duration_minutes` leaves the countdown unchanged, and disabling autoplay does not cancel it. Use `/timer` to set, replace, or cancel the countdown. `GET /status` reports `autoplay_enabled`. Generated recommendation entries appear in `queue_items` with `autoplay_generated:true`; new explicit entries are placed before them.
 
-Enabling immediately tries the current YouTube video and then up to 20 eligible non-generated YouTube queue entries in live order. Non-YouTube entries do not consume those slots. One worker reads up to 40 Mix candidates and appends up to 20 unseen suggestions. Existing suggestions stop further expansion. Unavailable/duplicate-only seeds advance the scan; operational failures retain a diagnostic and retry after a 60-second cooldown. Cancelling invalidates worker generations. Background cancellable commands have a 90-second per-command deadline; ordinary playlist expansion and uncancelled resolver calls retain their existing execution paths. Mix availability is not guaranteed.
+Autoplay uses recommendations from the current YouTube watch page. It appends up to 20 candidates after explicit queue entries, skipping duplicates and videos already played. It refills when the generated queue runs out. Operational failures retry after a 60-second cooldown.
 
 `POST /autoplay/error/clear` returns `{"ok":true}` and dismisses only the diagnostic. It leaves the worker, retry cooldown, queue, and autoplay setting intact. MediaBridge has no role checks; an integration must enforce its own permissions.
 
-Applications can inspect the waiting queue through `GET /status`. Use `queue_items` when you need the permanent/autoplay distinction; the simpler `queued` field contains URLs only. In each `queue_items` entry, `autoplay_generated:true` identifies a temporary YouTube Mix item that will be removed if autoplay is turned off. `autoplay_generated:false` identifies a permanent queue item, including Mix entries promoted with `POST /queue/promote`.
+Applications can inspect the waiting queue through `GET /status`. Use `queue_items` when you need the permanent/autoplay distinction; the simpler `queued` field contains URLs only. In each `queue_items` entry, `autoplay_generated:true` identifies a temporary YouTube recommendation item that will be removed if autoplay is turned off. `autoplay_generated:false` identifies a permanent queue item, including recommendation entries promoted with `POST /queue/promote`.
 
 `autoplay_generated` is assigned internally and is ignored in submitted item JSON. New suggestions clone the seed's playback settings, but clear submitter identity, duration, metadata/error/artwork, and SMB provider reference. The API does not assign display names to submitter IDs.
 
@@ -244,9 +244,11 @@ curl -sS -X POST "$BASE_URL/autoplay" \
 
 The scan tracks checked video IDs for the current playback root. Candidate selection reads the live queue on each dispatch, so newly added eligible entries can participate in the first 20 eligible slots. Changing the root clears the scan cache. A result can be used while its seed remains current or queued. Suggestions are filtered against current playback, queue, session history, and seen IDs. Turning autoplay off cancels the worker, invalidates older results, removes unplayed generated suggestions, and releases their seen markers so a later retry can suggest them again. Toggling resets the retry cooldown and checked-seed scan state.
 
-`autoplay_status` is display text, not a stable enum or structured progress object. Examples include `Checking current video · 2 queued candidates (max 20)`, `Checking queue item 23 · 2 queued candidates (max 20)`, and `No Mix available · waiting for new videos`. Queue positions are one-based positions in the full live queue; they can exceed 20 when other entries precede the eligible seeds. Clients should use `autoplay_loading` and `autoplay_error` for behavior rather than parse the display text. Clearing an error does not force a retry; the existing cooldown remains.
+Use autoplay_loading and autoplay_error for client behavior. The autoplay_status field contains display text. Clearing an error preserves the retry cooldown.
 
-Mix extraction first tries the seeded watch URL, then the direct Mix playlist URL. The latter can itself be unavailable. Recognized unavailable-playlist outcomes advance to another seed; other nonzero extractor exits are operational failures and trigger the cooldown. The current implementation also classifies exhausted parse/invalid-JSON attempts as `NO_MIX:` internally. That prefix is an internal classification, not a typed public error contract. These are generated YouTube Mix lookups, not general “Up next” recommendations.
+**GET /recommendations** returns an ordered list for the YouTube video current when the request arrives. The lookup works with autoplay off and leaves the queue intact. The response contains seed_video_id, signed_in, and videos. Each video has a url and a nullable title. A missing YouTube seed returns HTTP 409, a busy recommendation profile returns 503, and an upstream lookup failure returns 502.
+
+**POST /settings/recommendations/import** is available from loopback on the host. It imports YouTube cookies from MediaBridge's managed LibreWolf profile into Obscura and returns {"ok":true}. Sign in to YouTube and close LibreWolf first. Obscura keeps its profile across restarts. Check signed_in on a recommendation lookup after import and repeat import if needed.
 
 The 90-second deadline is per cancellable subprocess invocation. A two-attempt extraction and a multi-seed scan can take longer overall. There is no total scan deadline or background-output size cap in this implementation.
 
@@ -453,7 +455,7 @@ curl -sS -X POST "$BASE_URL/queue/move" \
   -H 'Content-Type: application/json' -d '{"index":2,"to":0}'
 ```
 
-`POST /queue/promote` turns a generated YouTube Mix entry into a permanent queue entry. Promoted entries stay queued when autoplay is disabled. Optional `queued_by_user_id` assigns attribution to the promoting caller.
+`POST /queue/promote` turns a generated YouTube recommendation entry into a permanent queue entry. Promoted entries stay queued when autoplay is disabled. Optional `queued_by_user_id` assigns attribution to the promoting caller.
 
 ```sh
 curl -sS -X POST "$BASE_URL/queue/promote" \
@@ -700,15 +702,15 @@ The response exposes the current item separately from the waiting queue. `curren
 | --- | --- |
 | `current` | Current item's URL, if any. |
 | `queued` | Array of waiting item URLs. |
-| `queue_items` | Array of waiting item objects with URL, metadata, playback options, and `autoplay_generated`. `true` means temporary Mix-generated; `false` means permanent. |
+| `queue_items` | Array of waiting item objects with URL, metadata, playback options, and `autoplay_generated`. `true` means temporary recommendation; `false` means permanent. |
 | `history_items` | Session history, newest first, using the same item schema as `queue_items`. Both include `queued_by_user_id`, `duration_seconds`, and `metadata_error`, without SMB credential references. |
 | `hardware_decoder` | mpv decoder name, `software` when disabled, `checking` when unavailable, or `null` for browser playback. |
 | `playback_epoch` | Playback generation; send it with track-selection requests to reject stale track IDs. |
 | `subtitle_tracks`, `audio_tracks` | Current mpv track lists with IDs, language/title, codec, selection/default/forced/external flags, and channel count where available. |
 | `tracks_available` | Whether mpv's track list could be read; false for browser playback or unavailable IPC. |
-| `autoplay_loading` | Whether a Mix worker is active. |
-| `autoplay_error` | Last operational Mix error, or `null`. |
-| `autoplay_status` | Human-readable Mix scan progress; queue positions refer to the full live queue. |
+| `autoplay_loading` | Whether a recommendation worker is active. |
+| `autoplay_error` | Last operational recommendation error, or `null`. |
+| `autoplay_status` | Human-readable recommendation lookup status. |
 | `playing` | `true` when the state is reported as playing. |
 | `mirroring` | Whether a Moonlight process is active. |
 | `playback_state` | Player state such as `loading` (mpv startup), `playing`, `paused`, `idle`, `mirroring`, or `unknown`. |
@@ -769,14 +771,14 @@ Example public queue/history item (illustrative; the same nullable metadata fiel
 
 This is the complete public item shape; it does not serialize every request option. In particular, it omits `smb_share_id`, credentials, private relay URLs, browser arguments, and per-item autoplay switches. The top-level `duration_seconds` describes current playback; an entry's `duration_seconds` describes that queued/history item.
 
-Selected current status fields during a Mix lookup could look like this (partial object):
+Selected current status fields during a recommendation lookup could look like this (partial object):
 
 ```json
 {
   "autoplay_enabled": true,
   "autoplay_loading": true,
   "autoplay_error": null,
-  "autoplay_status": "Checking current video · 2 queued candidates (max 20)",
+  "autoplay_status": "Checking current video",
   "hardware_decoder": "nvdec-copy",
   "playback_error": null
 }
@@ -853,7 +855,7 @@ curl -sS -X POST "$BASE_URL/settings/preferences" \
   -d '{"default_screen":1,"default_quality":"1080","default_video_codec":"h264","subtitles":true,"preferred_language":"en","cookies_browser":"librewolf","cookies_profile":null}'
 ```
 
-`default_screen` is `null` or 0–32. `default_quality` accepts `"best"` or a numeric resolution from 144–4320; omitted/null requests fall back to `"720"`. Configuration loading also migrates missing/null or saved `"best"` defaults to `"720"`. Explicit per-item `quality:"best"` remains uncapped. `default_video_codec` is `h264` (default), `vp9`, or `auto`, with fallbacks when the preferred codec is unavailable. The dashboard offers 2160, 1440, 1080, 720, and 480 presets. `cookies_browser` can be `auto`, `off`, `librewolf`, `chrome`, `chromium`, `edge`, `firefox`, `brave`, `opera`, `vivaldi`, or `whale`. Selected cookies also apply to background YouTube metadata, playlists, and Mix extraction. A cookie profile is optional and must not contain commas or line breaks.
+`default_screen` is `null` or 0–32. `default_quality` accepts `"best"` or a numeric resolution from 144–4320; omitted/null requests fall back to `"720"`. Configuration loading also migrates missing/null or saved `"best"` defaults to `"720"`. Explicit per-item `quality:"best"` remains uncapped. `default_video_codec` is `h264` (default), `vp9`, or `auto`, with fallbacks when the preferred codec is unavailable. The dashboard offers 2160, 1440, 1080, 720, and 480 presets. `cookies_browser` can be `auto`, `off`, `librewolf`, `chrome`, `chromium`, `edge`, `firefox`, `brave`, `opera`, `vivaldi`, or `whale`. Selected cookies also apply to background YouTube metadata and playlists. A cookie profile is optional and must not contain commas or line breaks.
 
 For local mpv extraction, codec ordering is H.264 → VP9 → general video/audio → combined format when `h264` is selected, and VP9 → H.264 → the same general fallbacks for `vp9`. `auto` uses general video/audio and combined fallbacks. Every fallback applies the requested height cap; `quality:"best"` removes that cap without overriding the codec preference. MediaBridge always passes its constructed format selector to mpv. These settings select available streams; they do not transcode media or alter browser playback quality.
 
@@ -922,7 +924,7 @@ curl -sS -X POST "$BASE_URL/sunshine" \
 
 The Now playing card uses an icon toolbar: previous, back five seconds, play/pause, forward five seconds, next, and close all playback. The play/pause button follows the reported player state and uses the existing pause/resume/toggle commands. Icons have accessible names and tooltips, with 44-pixel touch targets (40 pixels on very narrow screens). No endpoint semantics change.
 
-The dashboard uses a compact responsive layout. Playback controls stay prominent; **Playback options** (including attribution/SMB access), **More play actions**, **Add a batch**, **History**, **Steam session**, and **Audio & subtitles** expand to reveal their controls. **Settings** contains grouped Accounts, Network access, Playback defaults (including Browser cookies), and Server port settings. Question-mark help controls expose detailed guidance by tap/click or keyboard activation, with hover/focus styling on desktop. Source URLs remain available through per-item help. Shorter labels do not change the endpoints below: **Queue** inserts before Mix suggestions, and **Queue at end** appends after everything. Every previously available control remains available; no server setting or API option was removed. The playback-mode selector stays visible in Sunshine mode so users can switch back without reloading.
+The dashboard uses a compact responsive layout. Playback controls stay prominent; **Playback options** (including attribution/SMB access), **More play actions**, **Add a batch**, **History**, **Steam session**, and **Audio & subtitles** expand to reveal their controls. **Settings** contains grouped Accounts, Network access, Playback defaults (including Browser cookies), and Server port settings. Question-mark help controls expose detailed guidance by tap/click or keyboard activation, with hover/focus styling on desktop. Source URLs remain available through per-item help. Shorter labels do not change the endpoints below: **Queue** inserts before generated recommendations, and **Queue at end** appends after everything. Every previously available control remains available; no server setting or API option was removed. The playback-mode selector stays visible in Sunshine mode so users can switch back without reloading.
 
 The dashboard exposes the API improvements as follows:
 
@@ -931,13 +933,13 @@ The dashboard exposes the API improvements as follows:
 | Play now | `/play`, or `/play_playlist` for a playlist; replaces the queue. |
 | Play now · keep queue | `/play_preserve_queue` for one video. |
 | Play now · resume current next | `/play_interrupt` for one video; disabled when a current item reports no seeking. Server checks still apply. |
-| Play next / Play last | Existing queue/playlist routes. Ordinary Play last inserts before Mix suggestions. |
+| Play next / Play last | Existing queue/playlist routes. Ordinary Play last inserts before generated recommendations. |
 | Append after everything | `/queue` with `at_end:true` for one video. |
 | Add a batch | One URL per line, 1–200 items, `/queue_batch` with next/last. Uses the form's playback settings. Each URL is an individual item; playlists are not expanded. |
 | Session history | `history_items`, newest first. Replay now keeps the queue; next/last enqueue a copy. Selected history entries are submitted in displayed order through `/queue_batch`. Selection clears if history URL ordering changes. |
-| Submitter ID | Optional caller-supplied `queued_by_user_id` on new submissions, history replays, and Mix promotion. No login or name lookup is added. |
+| Submitter ID | Optional caller-supplied `queued_by_user_id` on new submissions, history replays, and recommendation promotion. No login or name lookup is added. |
 | Queue/history metadata | Duration (or explicitly unknown), submitter ID, lookup errors, and saved resume position are shown. History responses now also include `browser` and `subtitles` so replay can retain those settings. |
-| Decoder and Mix status | `hardware_decoder`, `autoplay_status`, `autoplay_loading`, and `autoplay_error`. Dismiss Mix error calls `/autoplay/error/clear` without resetting cooldown. |
+| Decoder and recommendation status | `hardware_decoder`, `autoplay_status`, `autoplay_loading`, and `autoplay_error`. Dismiss recommendation error calls `/autoplay/error/clear` without resetting cooldown. |
 | Subtitle/audio selectors | Live mpv track lists, Off controls, and a checked-by-default remember switch. `/subtitles/select` and `/audio/select` carry the playback epoch. |
 | Alternate audio toggle | Per-video and persistent `load_multiple_audio_tracks` controls; off requests original/default extracted audio only. |
 | Close countdown | Custom numeric minutes, remaining time, and start/replace/cancel controls using `/timer`. Works independently of the autoplay toggle. Expiry and Close all playback use the same global cleanup. |

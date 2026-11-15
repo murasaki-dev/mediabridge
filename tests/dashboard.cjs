@@ -88,7 +88,7 @@ async function run() {
   assert.equal(node('play-toggle').dataset.control,'resume');
   assert.equal(node('play-toggle')['aria-label'],'Play');
   assert.equal(node('hardware-decoder').textContent, 'Video decoder: software');
-  assert.match(node('autoplay-state').textContent, /Loading Mix/);
+  assert.match(node('autoplay-state').textContent, /Loading recommendations/);
   assert.equal(node('autoplay-error').textContent, 'Lookup failed');
   node('url').value = 'https://example.com/new.mp4'; node('submitter-id').value = 'caller';
   await node('play-interrupt').onclick();

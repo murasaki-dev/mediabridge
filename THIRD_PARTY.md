@@ -9,7 +9,8 @@ MediaBridge depends on the work of these projects and their contributors. This i
 | [mpv](https://mpv.io/) | Local playback, extractor integration, IPC controls, and hardware decoding. |
 | [FFmpeg](https://ffmpeg.org/) | Media decoding/protocol support in playback builds; capabilities depend on the installed build. |
 | [zhongfly/mpv-winbuild](https://github.com/zhongfly/mpv-winbuild) | Windows mpv binaries downloaded by the packaging script. |
-| [yt-dlp](https://github.com/yt-dlp/yt-dlp) | Media extraction, metadata, playlist/Mix expansion, and cookie checks. |
+| [Obscura](https://github.com/h4ckf0r0day/obscura) | Local headless browser for YouTube recommendations. |
+| [yt-dlp](https://github.com/yt-dlp/yt-dlp) | Media extraction, metadata, playlist expansion, and cookie checks. |
 | [yt-dlp EJS](https://github.com/yt-dlp/ejs) | Remote JavaScript challenge components requested through yt-dlp. |
 | [Deno](https://github.com/denoland/deno) | JavaScript runtime for yt-dlp challenge handling. |
 | [LibreWolf](https://librewolf.net/) | Managed browser and persistent sign-in profile; portable Windows and AppImage Linux distributions. |

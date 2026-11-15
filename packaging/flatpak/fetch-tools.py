@@ -93,6 +93,15 @@ def main(destination):
                 shutil.copyfileobj(source, output)
         (destination / "bin/deno").chmod(0o755)
 
+        version = "v0.2.7"
+        archive = download(
+            f"https://github.com/h4ckf0r0day/obscura/releases/download/{version}/obscura-x86_64-linux.tar.gz",
+            "obscura.tar.gz", version,
+        )
+        with (destination / "bin/obscura").open("wb") as output:
+            subprocess.run(["tar", "-xOzf", str(archive), "obscura"], stdout=output, check=True)
+        (destination / "bin/obscura").chmod(0o755)
+
         ytdlp = release("yt-dlp/yt-dlp")
         binary = download(asset(ytdlp, r"yt-dlp_linux"), "yt-dlp", ytdlp["tag_name"])
         sums = download(asset(ytdlp, r"SHA2-256SUMS"), "yt-dlp-SHA256SUMS", ytdlp["tag_name"])
@@ -110,4 +119,3 @@ if __name__ == "__main__":
         main(sys.argv[1])
     except RuntimeError as error:
         raise SystemExit(str(error))
-

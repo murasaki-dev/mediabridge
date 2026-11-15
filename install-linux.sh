@@ -211,6 +211,12 @@ if [[ ! -x "$TMP_DIR/mediabridge/mediabridge" ]]; then
   exit 1
 fi
 
+# Install Obscura alongside the MediaBridge executable.
+curl --fail --location --silent --show-error \
+  https://github.com/h4ckf0r0day/obscura/releases/download/v0.2.7/obscura-x86_64-linux.tar.gz \
+  --output "$TMP_DIR/obscura.tar.gz"
+tar -xzf "$TMP_DIR/obscura.tar.gz" -C "$TMP_DIR/mediabridge" --no-same-owner obscura
+
 # Install Moonlight's official x86_64 AppImage privately with MediaBridge.
 # Extract it so launching Moonlight does not depend on AppImage/FUSE support.
 MOONLIGHT_RELEASE="$TMP_DIR/moonlight-release.json"
@@ -365,6 +371,7 @@ if [[ ! -x "$APP_DIR/moonlight-current/squashfs-root/AppRun" ]]; then
   exit 1
 fi
 
+install -m 755 "$TMP_DIR/mediabridge/obscura" "$APP_DIR/obscura"
 install -m 755 "$TMP_DIR/mediabridge/mediabridge" "$APP_DIR/mediabridge"
 ICON_FILE="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/512x512/apps/mediabridge.png"
 if [[ -f "$TMP_DIR/mediabridge/mediabridge.png" ]]; then

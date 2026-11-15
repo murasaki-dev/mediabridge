@@ -8,7 +8,7 @@ Control media on a Windows or Linux PC from another device on your LAN. MediaBri
 - Queue videos and YouTube playlists, reorder entries, replay history, and add batches without losing queued suggestions.
 - Interrupt with a new video, then resume the previous one next from its saved timestamp.
 - Set a custom close countdown to stop media, browser playback, Moonlight, and managed Steam together, independently of autoplay.
-- Continue with YouTube Mix suggestions, with visible lookup progress and errors.
+- Continue with YouTube watch-page recommendations, with visible lookup progress and errors.
 - Control playback, seeking, volume, browser zoom, and the host pointer.
 - Switch mpv subtitle/audio tracks, remember language choices, or disable them; alternate audio loading is optional.
 - Reuse local browser sign-ins for playback and background YouTube lookups.
@@ -63,6 +63,8 @@ Open **`http://<mediabridge-pc>:8765/`** from another device on the same network
 For Sunshine streaming, select **Sunshine / Moonlight**, start pairing, and enter Moonlight's PIN on the Sunshine host.
 
 The API has **no authentication or HTTPS**. Use it on a trusted LAN; anyone who can reach its port can control the host. The browser-origin allowlist is not user authentication. After changing the port, update the host firewall rule as needed.
+
+To personalize recommendations, sign in to YouTube in managed LibreWolf and close the browser. On the MediaBridge host, open the dashboard at http://127.0.0.1:8765/ and use **Settings → Import YouTube sign-in for recommendations**. Obscura stores its own local session. Import again if YouTube expires it. A signed-out profile uses public recommendations.
 
 ## Integrate
 

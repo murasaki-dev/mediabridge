@@ -155,6 +155,12 @@ Remove-Item -LiteralPath $moonlightExtract -Recurse -Force
 Write-Host 'Downloading yt-dlp...'
 Save-Download -Uri 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe' -OutFile (Join-Path $stage 'yt-dlp.exe')
 
+Write-Host 'Downloading Obscura...'
+$obscuraZip = Join-Path $dist 'obscura-x86_64-windows.zip'
+Save-Download -Uri 'https://github.com/h4ckf0r0day/obscura/releases/download/v0.2.7/obscura-x86_64-windows.zip' -OutFile $obscuraZip
+Expand-Archive -LiteralPath $obscuraZip -DestinationPath $stage -Force
+if (-not (Test-Path -LiteralPath (Join-Path $stage 'obscura.exe'))) { throw 'The Obscura archive did not contain obscura.exe.' }
+
 Write-Host 'Downloading Deno...'
 $denoZip = Join-Path $dist 'deno-x86_64-pc-windows-msvc.zip'
 Save-Download -Uri 'https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip' -OutFile $denoZip
@@ -229,4 +235,3 @@ Push-Location $project
 try { & $iscc "/DAppVersion=$appVersion" 'MediaBridge.iss'; if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed (exit $LASTEXITCODE)." } }
 finally { Pop-Location }
 Write-Host "Installer created: $(Join-Path $dist 'MediaBridge-Setup.exe')"
-

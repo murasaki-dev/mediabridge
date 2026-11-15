@@ -56,7 +56,7 @@ CONTAINER="$(podman run --detach --pull=missing "${network_args[@]}" "$IMAGE" sl
 podman image inspect "$IMAGE" --format '{{.Id}} {{.Digest}}' > "$WORK/image.txt"
 # Copy only source, never local settings, credentials, browser profiles or build outputs.
 tar -C "$ROOT_DIR" -cf "$WORK/source.tar" \
-  Cargo.toml Cargo.lock main.rs tests.rs dial.rs youtube_receiver.rs steam.rs steam_linux.rs steam_linux.py steam_windows.rs \
+  Cargo.toml Cargo.lock main.rs recommendations.rs tests.rs dial.rs youtube_receiver.rs steam.rs steam_linux.rs steam_linux.py steam_windows.rs \
   web assets packaging/flatpak
 podman cp "$WORK/source.tar" "$CONTAINER:/tmp/source.tar"
 podman exec "$CONTAINER" bash -c 'mkdir /src; tar -xf /tmp/source.tar -C /src; rm /tmp/source.tar; bash /src/packaging/flatpak/build-runtime.sh'
@@ -140,4 +140,3 @@ echo 'Copy BOTH bundles, install-flatpak.sh and start-flatpak.sh to the test com
 echo "Build log: $OUT/build.log"
 echo "Install: bash \"$OUT/install-flatpak.sh\""
 if [[ "$INSTALL" == 1 ]]; then bash "$OUT/install-flatpak.sh"; fi
-

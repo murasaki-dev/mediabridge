@@ -84,3 +84,5 @@ For native SMB providers on Windows, configure the environment of the process la
 On Linux, run `mediabridge-uninstall`. It removes launchers, the user service, installed executables, and any marked MediaBridge Distrobox, while keeping configuration (including `runtime.env`), logs, and browser data. `mediabridge-uninstall --purge-data` also removes those personal files. Shared system packages are left installed.
 
 On Windows, use the installed uninstaller. It removes startup integration, firewall rules, installed files, and the bundled browser profile. Optional user-data removal also deletes the app's local settings/log data.
+
+The Flatpak runtime, native Linux installer, and Windows setup include Obscura v0.2.7 for YouTube recommendations. Windows setup keeps its runtime DLLs beside its executable. A source build can use Obscura on PATH.

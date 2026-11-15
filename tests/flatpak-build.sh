@@ -10,7 +10,7 @@ cp "$ROOT/build-flatpak.sh" "$fixture/source with spaces/"
 cp -r "$ROOT/packaging" "$fixture/source with spaces/"
 cp -r "$ROOT/web" "$fixture/source with spaces/"
 cp -r "$ROOT/assets" "$fixture/source with spaces/"
-for file in Cargo.toml Cargo.lock main.rs tests.rs dial.rs youtube_receiver.rs steam.rs steam_linux.rs steam_linux.py steam_windows.rs; do
+for file in Cargo.toml Cargo.lock main.rs recommendations.rs tests.rs dial.rs youtube_receiver.rs steam.rs steam_linux.rs steam_linux.py steam_windows.rs; do
   cp "$ROOT/$file" "$fixture/source with spaces/"
 done
 export FLATPAK_TEST_LOG="$fixture/calls"

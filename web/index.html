@@ -139,6 +139,7 @@
       <label for="cookies-profile">Browser profile (optional)</label>
       <input id="cookies-profile" type="text" placeholder="Default, Profile 1, or Firefox profile name" autocomplete="off">
       <details class="help"><summary aria-label="Browser cookie help" aria-describedby="help-6">?</summary><div id="help-6" role="note">Uses the persistent MediaBridge LibreWolf profile through yt-dlp. MediaBridge does not access your YouTube account through OAuth. Sign in from the Connect your accounts section, then check cookie access here or in that section.</div></details>
+      <div class="row"><button id="import-recommendations" class="hidden" type="button">Import YouTube sign-in for recommendations</button></div>
       <div class="row"><button id="check-cookies" type="button">Check cookie access</button><img id="youtube-channel-avatar" class="avatar hidden" alt="YouTube channel profile picture"><span id="cookies-status" class="muted" role="status"></span></div>
       </details>
       <div class="row" style="margin-top:12px"><button id="save-playback-preferences" class="primary" type="button">Save defaults</button><span id="preferences-status" class="muted" role="status"></span></div>
@@ -218,16 +219,16 @@
     </div>
     <label style="display:flex;gap:8px;align-items:center;margin-top:10px"><input id="subtitles" type="checkbox"> Load subtitles (slower)</label>
     <label><input id="multiple-audio" type="checkbox"> Alternate audio tracks</label>
-    <label style="display:flex;gap:8px;align-items:center;margin-top:8px"><input id="autoplay-after-queue" type="checkbox"> Continue with YouTube Mix</label>
+    <label style="display:flex;gap:8px;align-items:center;margin-top:8px"><input id="autoplay-after-queue" type="checkbox"> Continue with YouTube recommendations</label>
     <details><summary>Attribution and SMB access</summary>
       <label for="submitter-id">Submitter ID (optional)</label><input id="submitter-id" type="text" autocomplete="off">
-      <details class="help"><summary aria-label="Submitter attribution help" aria-describedby="help-8">?</summary><div id="help-8" role="note">A caller-provided label, not a verified account. Also used when keeping a Mix suggestion.</div></details>
+      <details class="help"><summary aria-label="Submitter attribution help" aria-describedby="help-8">?</summary><div id="help-8" role="note">A caller-provided label, not a verified account. Also used when keeping a recommendation.</div></details>
       <label for="smb-share-id">SMB provider reference (optional)</label><input id="smb-share-id" type="text" autocomplete="off" maxlength="24">
       <details class="help"><summary aria-label="SMB provider help" aria-describedby="help-9">?</summary><div id="help-9" role="note">Use a 24-character hexadecimal reference from your configured provider. MediaBridge does not store SMB passwords or browse shares. Leave blank for direct guest access. Applies only to SMB links.</div></details>
     </details>
     </details>
-    <div class="primary-actions"><button id="play-now" class="primary" title="Replace playback and the waiting queue">Play now</button><button id="play-next" title="Insert first in the waiting queue">Queue next</button><button id="play-last" title="Add after manual items, before Mix suggestions">Queue</button></div>
-    <details><summary>More play actions</summary><div class="row"><button id="preview">Preview</button><button id="play-preserve" title="Replace the current video while keeping all waiting items">Play · keep queue</button><button id="play-interrupt" title="Play this video now; resume the interrupted video next at its saved timestamp">Interrupt &amp; resume</button><button id="append-tail" title="Append after every waiting item, including Mix suggestions">Queue at end</button></div></details>
+    <div class="primary-actions"><button id="play-now" class="primary" title="Replace playback and the waiting queue">Play now</button><button id="play-next" title="Insert first in the waiting queue">Queue next</button><button id="play-last" title="Add after manual items, before recommendations">Queue</button></div>
+    <details><summary>More play actions</summary><div class="row"><button id="preview">Preview</button><button id="play-preserve" title="Replace the current video while keeping all waiting items">Play · keep queue</button><button id="play-interrupt" title="Play this video now; resume the interrupted video next at its saved timestamp">Interrupt &amp; resume</button><button id="append-tail" title="Append after every waiting item, including recommendations">Queue at end</button></div></details>
     <details style="margin-top:12px"><summary>Add a batch</summary>
       <label for="batch-urls">One video URL per line (up to 200)</label><textarea id="batch-urls" placeholder="https://example.com/a.mp4&#10;https://example.com/b.mp4"></textarea>
       <details class="help"><summary aria-label="Batch queue help" aria-describedby="help-10">?</summary><div id="help-10" role="note">Uses the playback settings and optional submitter/provider reference above. Adds each URL as one item; playlist links are not expanded.</div></details>
@@ -245,7 +246,7 @@
     </details>
     <div id="message" role="status"></div>
   </section>
-  <section id="queue-card" class="card"><div class="row"><h2 style="margin:0;flex:1">Queue</h2><button id="autoplay-toggle" type="button">Enable autoplay</button></div><p id="autoplay-state" class="muted" role="status">Autoplay is off</p><div id="autoplay-error" class="hidden" role="status"></div><button id="clear-autoplay-error" class="hidden" type="button">Dismiss Mix error</button><ol id="queue"><li class="muted">Queue is empty</li></ol></section>
+  <section id="queue-card" class="card"><div class="row"><h2 style="margin:0;flex:1">Queue</h2><button id="autoplay-toggle" type="button">Enable autoplay</button></div><p id="autoplay-state" class="muted" role="status">Autoplay is off</p><div id="autoplay-error" class="hidden" role="status"></div><button id="clear-autoplay-error" class="hidden" type="button">Dismiss recommendation error</button><ol id="queue"><li class="muted">Queue is empty</li></ol></section>
   <section id="history-card" class="card"><details><summary>History</summary><details class="help"><summary aria-label="History replay help" aria-describedby="help-11">?</summary><div id="help-11" role="note">Newest first, up to 50 items. Replaying keeps the waiting queue. For SMB provider playback, enter the matching provider reference above before replaying.</div></details>
     <div class="row"><button id="history-select-all" type="button">Select all</button><button id="history-clear-selection" type="button">Clear selection</button><button id="history-next" type="button" disabled>Queue selected next</button><button id="history-last" type="button" disabled>Queue selected last</button><span id="history-selection-count" class="muted">0 selected</span></div>
     <ol id="history"><li class="muted">History is empty</li></ol>
@@ -603,6 +604,21 @@
     } catch (error) { $('preferences-status').textContent = error.message; }
     finally { button.disabled = false; }
   };
+  if (['localhost', '127.0.0.1', '[::1]'].includes(window.location.hostname)) {
+    const button = $('import-recommendations');
+    button.classList.remove('hidden');
+    button.onclick = async () => {
+      button.disabled = true;
+      try {
+        await api('/settings/recommendations/import');
+        $('cookies-status').textContent = 'YouTube sign-in imported for recommendations.';
+      } catch (error) {
+        $('cookies-status').textContent = error.message;
+      } finally {
+        button.disabled = false;
+      }
+    };
+  }
   $('check-cookies').onclick = async () => {
     const button = $('check-cookies'); button.disabled = true; $('cookies-status').textContent = 'Checking browser profile access and YouTube…';
     try {
@@ -966,7 +982,7 @@
   const historySelection = new Set();
   function describeItem(item) {
     const duration = Number.isFinite(item.duration_seconds) && item.duration_seconds > 0 ? time(item.duration_seconds) : 'Duration unknown';
-    return [item.autoplay_generated ? 'YouTube Mix' : null, item.uploader, duration,
+    return [item.autoplay_generated ? 'YouTube recommendations' : null, item.uploader, duration,
       item.queued_by_user_id ? `Submitted by ${item.queued_by_user_id}` : null,
       item.start_position_seconds != null ? `Resume at ${time(item.start_position_seconds)}` : null,
       item.local ? 'mpv' : 'browser', item.quality && item.quality !== 'best' ? `${item.quality}p max` : null,
@@ -1102,7 +1118,7 @@
       $('autoplay-toggle').dataset.enabled = state.autoplay_enabled ? 'true' : 'false';
       $('autoplay-toggle').textContent = state.autoplay_enabled ? 'Disable autoplay' : 'Enable autoplay';
       $('autoplay-state').textContent = state.autoplay_enabled
-        ? `${state.autoplay_loading ? 'Loading Mix… ' : ''}${state.autoplay_status || 'Autoplay is on'}`
+        ? `${state.autoplay_loading ? 'Loading recommendations… ' : ''}${state.autoplay_status || 'Autoplay is on'}`
         : 'Autoplay is off';
       const remaining = state.close_remaining_seconds;
       $('close-countdown').textContent = Number.isFinite(remaining) ? `Closing all playback in ${time(Math.ceil(remaining))}` : 'No close countdown';

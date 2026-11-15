@@ -749,7 +749,7 @@ fn stale_autoplay_results_cannot_fill_queue() {
     state.autoplay_generation = 2;
     state.current = Some(item("https://www.youtube.com/watch?v=abcdefghijk", false));
     state.autoplay_rx = Some(rx);
-    tx.send((1, state.current.as_ref().unwrap().url.clone(), Ok(vec!["https://www.youtube.com/watch?v=lmnopqrstuv".into()]))).unwrap();
+    tx.send((1, state.current.as_ref().unwrap().url.clone(), Ok(vec![recommendations::Video { url: "https://www.youtube.com/watch?v=lmnopqrstuv".into(), title: None }]))).unwrap();
     drain_autoplay_results(&mut state);
     assert!(state.queue.is_empty());
 }

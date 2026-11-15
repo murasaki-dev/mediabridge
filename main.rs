@@ -1,7 +1,9 @@
 //! A small, single-file media bridge. Browser and Moonlight are separate
 //! programs, with the installers optionally bundling their runtime files.
 
-#![cfg_attr(windows, windows_subsystem = "windows")]
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
+
+mod recommendations;
 
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
@@ -579,8 +581,8 @@ struct State {
     playback_epoch: u64,
     autoplay_enabled: bool,
     close_deadline: Option<std::time::Instant>,
-    autoplay_tx: Option<Sender<(u64, String, Result<Vec<String>, String>)>>,
-    autoplay_rx: Option<Receiver<(u64, String, Result<Vec<String>, String>)>>,
+    autoplay_tx: Option<Sender<(u64, String, Result<Vec<recommendations::Video>, String>)>>,
+    autoplay_rx: Option<Receiver<(u64, String, Result<Vec<recommendations::Video>, String>)>>,
     autoplay_generation: u64,
     autoplay_in_flight: Option<String>,
     autoplay_cancel: Option<Arc<AtomicBool>>,
@@ -847,7 +849,7 @@ fn usage() -> &'static str {
     "mediabridge [--bind IP:PORT] [--moonlight PATH] [--moonlight-arg ARG]... [--cookies-from-browser BROWSER]\n\
      Choose browser and optional browser_args per /play or /queue request.\n\
      Browser playback always uses bundled LibreWolf; system browsers are never launched.\n\
-     --cookies-from-browser applies browser cookies to mpv and YouTube metadata, playlists, and Mix lookups.\n\
+     --cookies-from-browser applies browser cookies to mpv and YouTube metadata and playlists.\n\
      Moonlight arguments may contain {host} and {app}; defaults are `stream {host} {app}`."
 }
 
@@ -1630,46 +1632,6 @@ fn parse_youtube_playlist_json(output: &[u8]) -> Result<Vec<String>, String> {
     Ok(urls)
 }
 
-fn expand_youtube_mix_cancellable(video_url: &str, cancel: &AtomicBool) -> Result<Vec<String>, String> {
-    let id = youtube_video_id(video_url).ok_or("could not extract a YouTube video ID for its Mix")?;
-    let urls = [
-        format!("https://www.youtube.com/watch?v={id}&list=RD{id}&start_radio=1"),
-        format!("https://www.youtube.com/playlist?list=RD{id}"),
-    ];
-    let mut failures = Vec::new();
-    for (attempt, url) in urls.iter().enumerate() {
-        if cancel.load(Ordering::Acquire) { return Err("YouTube Mix lookup was cancelled".into()); }
-        let mut command = media_tool_command("yt-dlp");
-        // Application-managed arguments and cookie preferences must not inherit
-        // a user's yt-dlp configuration that changes playlist extraction.
-        command.arg("--ignore-config");
-        add_youtube_lookup_cookies(&mut command, video_url)?;
-        command.args(["--flat-playlist", "--dump-single-json", "--skip-download", "--yes-playlist", "--playlist-end", "40", "--socket-timeout", "10", "--retries", "1", "--extractor-retries", "1", url]);
-        add_deno_to_path(&mut command);
-        let output = run_cancellable_command(command, cancel)?;
-        let diagnostic = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        if !output.status.success() {
-            if diagnostic.contains("This playlist type is unviewable") || diagnostic.contains("The playlist does not exist") {
-                failures.push(diagnostic);
-                continue;
-            }
-            return Err(if diagnostic.is_empty() { format!("yt-dlp could not read the YouTube Mix ({})", output.status) } else { diagnostic });
-        }
-        match parse_youtube_playlist_json(&output.stdout) {
-            Ok(videos) => return Ok(videos),
-            Err(error) => {
-                let shape = serde_json::from_slice::<serde_json::Value>(&output.stdout).ok()
-                    .map(|value| format!("type={}, extractor={}", value.get("_type").and_then(|v| v.as_str()).unwrap_or("video"), value.get("extractor_key").and_then(|v| v.as_str()).unwrap_or("unknown")))
-                    .unwrap_or_else(|| "invalid JSON".into());
-                let failure = format!("Mix URL attempt {}: {error} ({shape}). {diagnostic}", attempt + 1);
-                eprintln!("{failure}");
-                failures.push(failure);
-            }
-        }
-    }
-    Err(format!("NO_MIX: YouTube did not return a usable Mix playlist. {}", failures.join("\n")))
-}
-
 fn update_item_metadata(item: &mut QueueItem, metadata: &serde_json::Value) {
     item.metadata_error = None;
     if let Some(duration) = metadata.get("duration_seconds").and_then(|value| value.as_f64()).filter(|duration| duration.is_finite() && *duration > 0.0) {
@@ -1762,18 +1724,18 @@ fn dispatch_pending_metadata(state: &mut State) {
 }
 
 fn drain_autoplay_results(state: &mut State) {
-    let results: Vec<(u64, String, Result<Vec<String>, String>)> = state.autoplay_rx.as_ref()
+    let results: Vec<(u64, String, Result<Vec<recommendations::Video>, String>)> = state.autoplay_rx.as_ref()
         .map(|receiver| receiver.try_iter().collect()).unwrap_or_default();
     for (generation, seed, result) in results {
         if generation != state.autoplay_generation { continue; }
         if state.autoplay_in_flight.as_deref() == Some(&seed) { state.autoplay_in_flight = None; state.autoplay_cancel = None; }
         if !state.autoplay_enabled { continue; }
-        if !state.current.iter().chain(state.queue.iter()).any(|item| same_media_url(&item.url, &seed)) { continue; }
+        if !state.current.as_ref().is_some_and(|item| same_media_url(&item.url, &seed)) { continue; }
         match result {
-            Ok(urls) => {
-                let Some(template) = state.current.iter().chain(state.queue.iter()).find(|item| same_media_url(&item.url, &seed)).cloned() else { continue; };
+            Ok(videos) => {
+                let Some(template) = state.current.clone() else { continue; };
                 let mut added = 0usize;
-                for url in urls {
+                for recommendations::Video {url, title} in videos {
                     let Some(id) = youtube_video_id(&url) else { continue; };
                     if state.autoplay_seen_ids.contains(&id)
                         || state.current.as_ref().is_some_and(|item| same_media_url(&item.url, &url))
@@ -1787,7 +1749,7 @@ fn drain_autoplay_results(state: &mut State) {
                     item.smb_share_id = None;
                     item.smb_credentials = None;
                     item.metadata_error = None;
-                    item.title = None; item.uploader = None; item.thumbnail_url = None; item.duration_seconds = None;
+                    item.title = title; item.uploader = None; item.thumbnail_url = None; item.duration_seconds = None;
                     item.channel_avatar_url = None; item.channel_banner_url = None;
                     item.autoplay_generated = true;
                     state.pending_queue_metadata.push_back(item.url.clone());
@@ -1803,63 +1765,53 @@ fn drain_autoplay_results(state: &mut State) {
                 }
             }
             Err(error) => {
-                if error.starts_with("NO_MIX:") {
-                    if let Some(id) = youtube_video_id(&seed) { state.autoplay_checked_ids.insert(id); }
-                    state.autoplay_phase = "searching".into();
-                    state.autoplay_error = None;
-                    state.autoplay_requested_seed = None;
-
-                    continue;
-                }
                 state.autoplay_phase = "failed".into();
                 state.autoplay_error = Some(error.clone());
                 state.autoplay_requested_seed = None;
                 state.autoplay_retry_at = Some(std::time::Instant::now() + Duration::from_secs(60));
-                eprintln!("could not expand the YouTube Mix for {}: {error}", safe_media_url(&seed));
+                eprintln!("could not load YouTube recommendations for {}: {error}", safe_media_url(&seed));
             }
         }
     }
 }
 
-fn dispatch_autoplay_mix(state: &mut State) {
+fn dispatch_autoplay_recommendations(state: &mut State) {
     if !state.autoplay_enabled || state.autoplay_in_flight.is_some() { return; }
     if state.queue.iter().any(|item| item.autoplay_generated) { state.autoplay_phase = "queued".into(); return; }
     let root = state.current.as_ref().map(|item| item.url.clone());
     if state.autoplay_scan_root != root {
-        state.autoplay_scan_root = root;
+        state.autoplay_scan_root = root.clone();
+        state.autoplay_requested_seed = None;
         state.autoplay_checked_ids.clear();
     }
-    let candidates: Vec<String> = state.current.iter().filter(|item| youtube_video_id(&item.url).is_some())
-        .chain(state.queue.iter().filter(|item| !item.autoplay_generated && youtube_video_id(&item.url).is_some()).take(20))
-        .map(|item| item.url.clone()).collect();
-    if let Some(seed) = candidates.into_iter().find(|url| youtube_video_id(url).is_some_and(|id| !state.autoplay_checked_ids.contains(&id))) {
-        request_autoplay_mix(state, seed);
-    } else { state.autoplay_phase = "no_mix".into(); }
+    if let Some(seed) = root.filter(|url| recommendations::video_id(url).is_some_and(|id| !state.autoplay_checked_ids.contains(&id))) {
+        request_autoplay_recommendations(state, seed);
+    } else { state.autoplay_phase = "no_recommendations".into(); }
 }
 
-fn request_autoplay_mix(state: &mut State, seed: String) {
+fn request_autoplay_recommendations(state: &mut State, seed: String) {
     if !state.autoplay_enabled || state.autoplay_in_flight.is_some() { return; }
     if state.autoplay_retry_at.is_some_and(|deadline| std::time::Instant::now() < deadline) { return; }
-    let Some(id) = youtube_video_id(&seed) else { return; };
+    let Some(id) = recommendations::video_id(&seed) else { return; };
     if state.autoplay_requested_seed.as_deref() == Some(&id) { return; }
     let Some(tx) = state.autoplay_tx.clone() else { return; };
     state.autoplay_requested_seed = Some(id.clone());
     state.autoplay_phase = "searching".into();
-    state.autoplay_seen_ids.insert(id);
+    state.autoplay_seen_ids.insert(id.clone());
     state.autoplay_in_flight = Some(seed.clone());
     let cancel = Arc::new(AtomicBool::new(false));
     state.autoplay_cancel = Some(cancel.clone());
     state.autoplay_generation = state.autoplay_generation.wrapping_add(1);
     let generation = state.autoplay_generation;
 
-    thread::spawn(move || { let result = expand_youtube_mix_cancellable(&seed, &cancel); let _ = tx.send((generation, seed, result)); });
+    thread::spawn(move || { let result = recommendations::lookup(id, &cancel).map(|result| result.videos); let _ = tx.send((generation, seed, result)); });
 }
 
 fn enqueue_autoplay_item(state: &mut State, item: QueueItem) { state.queue.push_back(item); }
 
 fn enqueue_explicit_item(state: &mut State, item: QueueItem) {
     // Explicit additions take priority over suggestions without discarding
-    // the generated Mix or disturbing the order of existing queue entries.
+    // the generated recommendations or disturbing the order of existing queue entries.
     let index = state.queue.iter().position(|queued| queued.autoplay_generated).unwrap_or(state.queue.len());
     state.queue.insert(index, item);
 }
@@ -1884,24 +1836,18 @@ fn set_autoplay(state: &mut State, enabled: bool, duration_minutes: Option<f64>)
         state.autoplay_requested_seed = None;
     } else {
         state.autoplay_requested_seed = None;
-        dispatch_autoplay_mix(state);
+        dispatch_autoplay_recommendations(state);
     }
 }
 
 fn autoplay_status_text(state: &State) -> String {
-    if !state.autoplay_enabled { return "Continue with YouTube Mix".into(); }
-    if let Some(seed) = state.autoplay_in_flight.as_deref() {
-        let eligible = state.queue.iter().filter(|item| !item.autoplay_generated && youtube_video_id(&item.url).is_some()).count().min(20);
-        if let Some(index) = state.queue.iter().position(|item| same_media_url(&item.url, seed)) {
-            return format!("Checking queue item {} · {} queued candidates (max 20)", index + 1, eligible);
-        }
-        return format!("Checking current video · {} queued candidates (max 20)", eligible);
-    }
+    if !state.autoplay_enabled { return "Continue with YouTube recommendations".into(); }
+    if state.autoplay_in_flight.is_some() { return "Checking current video".into(); }
     match state.autoplay_phase.as_str() {
-        "queued" => "YouTube Mix videos queued".into(),
-        "failed" => "Mix lookup failed · retrying after cooldown".into(),
-        "no_mix" => "No Mix available · waiting for new videos".into(),
-        _ => "Looking for a YouTube Mix".into(),
+        "queued" => "Recommended YouTube videos queued".into(),
+        "failed" => "Recommendation lookup failed · retrying after cooldown".into(),
+        "no_recommendations" => "No recommendations available · waiting for new videos".into(),
+        _ => "Looking for YouTube recommendations".into(),
     }
 }
 
@@ -3475,7 +3421,7 @@ fn advance(state: &mut State, cfg: &Config) {
                 }) {state.autoplay_waiting_to_advance=true;}
             } else if state.autoplay_enabled {
                 if let Some(seed) = state.current.as_ref().filter(|item| youtube_url(&item.url)).map(|item| item.url.clone()) {
-                    request_autoplay_mix(state, seed);
+                    request_autoplay_recommendations(state, seed);
                 }
                 if state.autoplay_in_flight.is_some() { state.autoplay_waiting_to_advance = true; }
                 else {
@@ -3519,7 +3465,7 @@ fn advance(state: &mut State, cfg: &Config) {
         if let Some(socket) = state.mpv_socket.take() { let _ = std::fs::remove_file(socket); }
         if state.queue.is_empty() && state.autoplay_enabled {
             if let Some(seed) = state.current.as_ref().filter(|item| youtube_url(&item.url)).map(|item| item.url.clone()) {
-                request_autoplay_mix(state, seed);
+                request_autoplay_recommendations(state, seed);
             }
             if state.autoplay_in_flight.is_some() {
                 state.autoplay_waiting_to_advance = true;
@@ -3536,7 +3482,7 @@ fn advance(state: &mut State, cfg: &Config) {
         }
     }
     drain_autoplay_results(state);
-    dispatch_autoplay_mix(state);
+    dispatch_autoplay_recommendations(state);
     if state.autoplay_waiting_to_advance {
         if !state.queue.is_empty() {
             if start_front_queued_with(state, |state, item| {
@@ -4527,6 +4473,31 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         return;
     }
 
+    if method == Method::Get && path == "/recommendations" {
+        let Some(seed) = state.current.as_ref().and_then(|item| recommendations::video_id(&item.url)) else {
+            respond(request, 409, json(&serde_json::json!({"error":"No current YouTube video"})), "application/json");
+            return;
+        };
+        thread::spawn(move || match recommendations::lookup(seed, &AtomicBool::new(false)) {
+            Ok(result) => respond(request, 200, json(&result), "application/json"),
+            Err(error) => {
+                let status = if error == "a recommendation lookup is already running" { 503 } else { 502 };
+                respond(request, status, json(&serde_json::json!({"error":error})), "application/json");
+            }
+        });
+        return;
+    }
+    if method == Method::Post && path == "/settings/recommendations/import" {
+        if !request.remote_addr().is_some_and(|addr| addr.ip().is_loopback()) {
+            respond(request, 403, json(&serde_json::json!({"error":"Import must be requested from the MediaBridge host"})), "application/json");
+            return;
+        }
+        thread::spawn(move || match recommendations::import_librewolf() {
+            Ok(()) => respond(request, 200, json(&serde_json::json!({"ok":true})), "application/json"),
+            Err(error) => respond(request, 409, json(&serde_json::json!({"error":error})), "application/json"),
+        });
+        return;
+    }
     if method == Method::Get && (path == "/" || path == "/index.html") {
         respond(request, 200, include_str!("web/index.html").to_string(), "text/html; charset=utf-8"); return;
     }
