@@ -29,8 +29,9 @@ if grep -Fxq io.github.murasaki_dev.MediaBridge <<< "$running_apps"; then
   echo 'MediaBridge is still running; installation stopped. Quit it and try again.' >&2
   exit 1
 fi
-flatpak install --user --noninteractive --assumeyes --or-update --bundle "$HERE/MediaBridge-Platform.flatpak"
-flatpak install --user --noninteractive --assumeyes --or-update --bundle "$HERE/MediaBridge.flatpak"
+# Replace existing local-bundle deployments, including an identical runtime.
+flatpak install --user --noninteractive --assumeyes --reinstall --bundle "$HERE/MediaBridge-Platform.flatpak"
+flatpak install --user --noninteractive --assumeyes --reinstall --bundle "$HERE/MediaBridge.flatpak"
 for driver in "${nvidia_drivers[@]}"; do
   echo "Installing the Flatpak graphics extension matching $driver..."
   flatpak install --user --noninteractive --assumeyes --or-update flathub "org.freedesktop.Platform.GL.$driver//1.4"

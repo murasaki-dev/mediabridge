@@ -66,11 +66,16 @@ if errorlevel 1 (
 )
 
 cd /d "%~dp0"
+where npm.cmd >nul 2>nul
+if errorlevel 1 (
+  echo Install Node.js 22 or newer with npm, then rerun this file.
+  exit /b 1
+)
 echo Building MediaBridge for Windows...
 if not exist "target" mkdir "target"
 rc.exe /nologo /i "assets" /fo "target\mediabridge-icon.res" "assets\windows.rc"
 if errorlevel 1 exit /b 1
-"%RUSTUP_EXE%" run stable-x86_64-pc-windows-msvc cargo rustc --bin mediabridge --release --locked -- -C "link-arg=%~dp0target\mediabridge-icon.res"
+"%RUSTUP_EXE%" run stable-x86_64-pc-windows-msvc cargo rustc --bin mediabridge --release --locked --features native-dashboard -- -C "link-arg=%~dp0target\mediabridge-icon.res"
 if errorlevel 1 (
   echo Build failed. The compiler output above contains the error details.
   exit /b 1
@@ -87,4 +92,3 @@ if errorlevel 1 (
   exit /b 1
 )
 exit /b 0
-

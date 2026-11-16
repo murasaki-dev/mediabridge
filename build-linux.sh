@@ -18,6 +18,10 @@ if ! command -v cargo >/dev/null 2>&1; then
   echo "Missing Rust/Cargo. Install the current Rust toolchain with rustup, then rerun this script." >&2
   exit 1
 fi
+if ! command -v npm >/dev/null 2>&1; then
+  echo "Missing npm. Install Node.js 22 or newer and npm, then rerun this script." >&2
+  exit 1
+fi
 
 # tray-icon links against GTK 3 and AppIndicator. Package names differ by
 # distro; install the native development packages when pkg-config cannot find
@@ -73,8 +77,7 @@ if ! pkg-config --exists gtk+-3.0 appindicator3-0.1; then
   exit 1
 fi
 
-cargo build --release --locked
+cargo build --release --locked --features native-dashboard
 mkdir -p dist
 tar -czf dist/mediabridge-linux-x86_64.tar.gz -C target/release mediabridge -C "$ROOT_DIR/assets" mediabridge.png
 echo "Built $ROOT_DIR/dist/mediabridge-linux-x86_64.tar.gz"
-

@@ -3,6 +3,14 @@
 Build from one source checkout and keep `Cargo.toml` and `Cargo.lock` together.
 Build scripts and installer definitions are versioned; generated output stays in
 `dist/` and compiler caches stay in `target/`.
+Release builders compile the Svelte dashboard and embed its static files in the
+MediaBridge executable. Windows and native Linux builds require Node.js 22 or
+newer and npm at build time. The Flatpak builder installs them inside its Fedora
+build container. The installed app serves the dashboard directly.
+
+For a development build that includes the new dashboard, run
+`cargo build --locked --features native-dashboard`. A Cargo build without
+that feature serves the legacy dashboard and needs no Node.js tooling.
 
 ## Windows
 
@@ -47,4 +55,3 @@ If container networking is unavailable, the Flatpak builder accepts
 
 WSL compilation does not verify desktop playback, GPU acceleration, or SMB
 connectivity on the target Linux computer. Run those checks on the target host.
-

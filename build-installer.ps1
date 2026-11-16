@@ -224,6 +224,23 @@ findstr /C:"devtools.debugger.remote-enabled" "%PROFILE%\user.js" >nul || >>"%PR
 findstr /V /C:"privacy.resistFingerprinting" "%PROFILE%\user.js" >"%PROFILE%\user.js.tmp"
 move /Y "%PROFILE%\user.js.tmp" "%PROFILE%\user.js" >nul
 >>"%PROFILE%\user.js" echo user_pref("privacy.resistFingerprinting", true^);
+findstr /C:"// MediaBridge browser chrome" "%PROFILE%\user.js" >nul || (
+  >>"%PROFILE%\user.js" echo // MediaBridge browser chrome
+  >>"%PROFILE%\user.js" echo user_pref("dom.webnotifications.enabled", false^);
+  >>"%PROFILE%\user.js" echo user_pref("permissions.default.desktop-notification", 2^);
+  >>"%PROFILE%\user.js" echo user_pref("browser.toolbars.bookmarks.visibility", "never"^);
+  >>"%PROFILE%\user.js" echo user_pref("toolkit.legacyUserProfileCustomizations.stylesheets", true^);
+)
+findstr /C:"// MediaBridge fresh startup" "%PROFILE%\user.js" >nul || (
+  >>"%PROFILE%\user.js" echo // MediaBridge fresh startup
+  >>"%PROFILE%\user.js" echo user_pref("browser.startup.page", 1^);
+  >>"%PROFILE%\user.js" echo user_pref("browser.sessionstore.resume_from_crash", false^);
+)
+if not exist "%PROFILE%\chrome" mkdir "%PROFILE%\chrome"
+findstr /C:"MediaBridge navigation bar" "%PROFILE%\chrome\userChrome.css" >nul 2>nul || (
+  >>"%PROFILE%\chrome\userChrome.css" echo /* MediaBridge navigation bar */
+  >>"%PROFILE%\chrome\userChrome.css" echo #main-window:not^([customizing]^) #nav-bar:not^(:focus-within^) { max-height: 0 !important; min-height: 0 !important; overflow: hidden !important; }
+)
 start "" "%~dp0mediabridge.exe"
 timeout /t 2 /nobreak >nul
 start "" "%~dp0librewolf\librewolf.exe" --profile "%PROFILE%" --remote-debugging-port 9222 "http://127.0.0.1:%PORT%/"

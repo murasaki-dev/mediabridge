@@ -973,3 +973,17 @@ Error bodies generally use this shape:
 
 Dashboard branding: GET /icon.png serves the application logo as PNG; GET /favicon.ico serves the multi-resolution Windows/browser icon. Both are embedded in the server, so clients do not need separate image files.
 
+
+### Subscriptions API
+
+- `GET /subscriptions/youtube` reads subscribed channels from the signed-in Obscura profile. `GET /subscriptions/youtube/{channel_id}` reads up to 20 recent uploads for a YouTube channel.
+- Sign in to Twitch in MediaBridge's managed LibreWolf on the host. **Accounts → Import cookies** in the loopback dashboard refreshes both YouTube and Twitch in their separate persistent Obscura profiles. Twitch uses `POST /settings/recommendations/import/twitch`. The host's Twitch **Check** refreshes Twitch and verifies the imported session against Following.
+- `GET /subscriptions/twitch` reads Twitch Following channels through Obscura. `GET /subscriptions/twitch/live` returns followed live streams. `GET /subscriptions/twitch/{channel_id}` takes the channel login and returns recent archived broadcasts. The endpoints expose the host account's feed to dashboard clients and return the items Obscura can render.
+- YouTube and Twitch channel lists and Twitch Live are cached in server memory. They refresh in the same scheduled cycle as YouTube Home. Turning that interval off stops scheduled refreshes for all three lists. Direct requests still work and reuse results for five minutes. Channel video pages are fetched on demand.
+- Channel lists contain `channels: [{id,title}]`. Video lists contain `videos: [{url,title,uploader,published,duration_seconds}]` with optional metadata. The account used is the one configured on the host. Anyone who can reach the existing MediaBridge LAN API can read that account's channel list.
+
+The YouTube Home feed has two cached read endpoints. GET /recommendations/home/short returns up to five entries with a snapshot ID and next_offset. Send both as query parameters for the next page. GET /recommendations/home/long returns up to 100 cached entries. POST /recommendations/home/long starts or joins a refresh. These responses include refreshing and long_enabled. The original Home endpoint still returns up to 20 entries.
+
+GET and POST /settings/recommendations/home read and set refresh_minutes. The default is 30. Set it to 0 (Off) to cancel extended refresh and disable startup prefetch and manual full refresh. Short requests still fetch the initial feed on demand when the cache is empty. An extended refresh tries up to seven continuation batches and can return fewer entries when YouTube does not supply more.
+
+POST /recommendations/home/short refreshes the initial Home page. POST /recommendations/home/extend requests more continuation batches and appends only new videos, up to 200 cached items. The short endpoint can page through those additions. Off blocks extended refresh and extension requests.

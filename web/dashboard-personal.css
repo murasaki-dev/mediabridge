@@ -1,0 +1,145 @@
+body.personal {
+  --accent: #e64968;
+  --panel: 27 23 36;
+  max-width: 1600px;
+  padding-left: 205px;
+  isolation: isolate;
+  color: #f4edf6;
+}
+body.personal[data-theme="violet"] { --accent: #aa86fc; --panel: 31 24 49; }
+body.personal[data-theme="teal"] { --accent: #4dd0bf; --panel: 17 36 39; }
+body.personal::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  opacity: var(--wallpaper-opacity);
+  background: var(--wallpaper, none) center / cover no-repeat, radial-gradient(ellipse at top right, #542944, #151424 65%);
+  pointer-events: none;
+}
+.personal .card { background: rgb(var(--panel) / var(--interface-opacity)); border-color: #ffffff26; }
+.personal button.primary { background: var(--accent); border-color: transparent; color: #160c17; }
+.personal input[type="range"] { accent-color: var(--accent); }
+.personal #personal-nav {
+  position: fixed;
+  inset: 0 auto 0 0;
+  width: 185px;
+  background: rgb(var(--panel) / var(--interface-opacity));
+  border-right: 1px solid #ffffff26;
+  padding: 16px 12px;
+  z-index: 7;
+}
+#personal-nav a { display: block; text-decoration: none; color: inherit; padding: 10px 5px; white-space: nowrap; }
+#personal-nav a:hover { color: var(--accent); }
+.personal.compact-sidebar { padding-left: 77px; }
+.personal.compact-sidebar #personal-nav { width: 60px; }
+.compact-sidebar #personal-nav span { display: none; }
+.personal #now-playing-card { grid-column: 1 / -1; position: sticky; top: 8px; z-index: 4; box-shadow: 0 5px 18px #0005; }
+.personal.collapsed-media #now-playing-card > :not(h2, #collapse-media, #title, .time, #seek, .transport-controls, #playback-error) { display: none; }
+.personal #title { font-weight: 650; overflow-wrap: anywhere; }
+#recommendation-videos { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(160px, 100%), 1fr)); gap: 12px; }
+#recommendation-videos article { display: grid; gap: 8px; align-content: start; padding: 8px; border: 1px solid #ffffff26; border-radius: 9px; }
+#recommendation-videos img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 6px; background: #16131f; }
+#recommendation-videos strong { font-size: .88rem; overflow-wrap: anywhere; }
+#personal-bookmarks ul { padding-left: 0; }
+#personal-bookmarks a { color: inherit; }
+#personal-recommendations, #personal-bookmarks, #queue-card { scroll-margin-top: 15rem; }
+@media (max-width: 760px) {
+  body.personal, body.personal.compact-sidebar { padding: 12px 12px 60px; }
+  .personal #personal-nav, .personal.compact-sidebar #personal-nav {
+    position: sticky; top: 0; width: auto; display: flex; align-items: center; gap: 8px;
+    border: 1px solid #ffffff26; border-radius: 10px; overflow-x: auto; padding: 4px 8px;
+  }
+  .personal #now-playing-card { top: 52px; }
+  .personal #now-playing-card:not(:has(#collapse-media[aria-expanded="false"])) { position: static; }
+  #recommendation-videos { grid-template-columns: repeat(2, minmax(0,1fr)); }
+}
+
+[hidden] { display: none !important; }
+.personal #personal-recommendations { grid-column: 1 / -1; }
+.personal #dashboard { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+body.personal {
+  --line: #bdb2d025;
+  --control: rgb(19 17 29 / .83);
+  padding-top: 12px;
+}
+body.personal[data-theme="slate"] { --accent: #9aaff1; --panel: 26 31 45; }
+.personal > header { min-height: 45px; padding: 0 0 10px; border-color: var(--line); }
+.personal > header h1 { display: none; }
+.personal > header > img { display: none; }
+.personal > header #connection { text-align: right; }
+.personal #dashboard {
+  grid-template-columns: minmax(0, 1.65fr) minmax(250px, 1fr);
+  gap: 14px;
+}
+.personal #now-playing-card {
+  order: -3;
+  border-radius: 11px;
+  background: rgb(var(--panel) / max(.86, var(--interface-opacity)));
+}
+.personal #add-media-card { order: -2; }
+.personal #queue-card { order: -1; }
+.personal #personal-recommendations { order: 0; }
+.personal #personal-bookmarks { order: 1; grid-column: 1 / -1; }
+.personal #history-card, .personal #timer-card, .personal #touchpad-card { order: 2; }
+.personal.collapsed-media #now-playing-card {
+  display: grid;
+  grid-template-columns: minmax(100px, 1fr) auto minmax(90px, .85fr) auto;
+  gap: 8px 14px;
+  align-items: center;
+  padding: 8px 14px;
+}
+.personal.collapsed-media #now-playing-card h2 { display: none; }
+.personal.collapsed-media #title { grid-column: 1; grid-row: 1; }
+.personal.collapsed-media #now-playing-card .transport-controls { grid-column: 2; grid-row: 1; margin: 0 !important; }
+.personal.collapsed-media #now-playing-card .time { display: none; }
+.personal.collapsed-media #seek { grid-column: 3; grid-row: 1; }
+.personal.collapsed-media #collapse-media { grid-column: 4; grid-row: 1; }
+.personal #playback-error { grid-column: 1 / -1; }
+.personal .transport-controls button { background: var(--control); border-color: var(--line); }
+.personal .transport-controls #play-toggle { background: var(--accent); border-color: transparent; color: #140a12; }
+.personal .card, .personal .settings-group { box-shadow: 0 6px 22px #0004; }
+.personal #settings-drawer { background: rgb(var(--panel) / .98); }
+.personal #settings-drawer > .row { background: rgb(var(--panel)); }
+.personal .settings-group { background: rgb(var(--panel) / var(--interface-opacity)); }
+.sidebar-brand { display: flex; align-items: center; gap: 8px; margin-bottom: 24px; }
+.sidebar-brand strong { flex: 1; font-size: .95rem; }
+.sidebar-brand button { padding: 3px 8px; }
+.compact-sidebar .sidebar-brand img, .compact-sidebar .sidebar-brand strong { display: none; }
+.personal #personal-nav a, .personal .sidebar-action {
+  display: block; width: 100%; text-align: left; border-radius: 8px;
+  background: transparent; border: 1px solid transparent; margin: 4px 0; padding: 10px 7px;
+}
+.personal #personal-nav a:first-of-type { background: color-mix(in srgb, var(--accent) 23%, transparent); }
+.personal #personal-nav a:hover, .personal .sidebar-action:hover { border-color: var(--line); background: #ffffff10; }
+.theme-swatches { display: flex; gap: 9px; margin: 10px 0 16px; }
+.theme-swatches button { width: 40px; height: 34px; border: 1px solid var(--line); border-radius: 8px; }
+.theme-swatches button[aria-pressed="true"] { outline: 2px solid #e8def5; outline-offset: 2px; }
+.theme-swatches [data-theme-preset="crimson"] { background: #83253e; }
+.theme-swatches [data-theme-preset="violet"] { background: #63478e; }
+.theme-swatches [data-theme-preset="teal"] { background: #246661; }
+.theme-swatches [data-theme-preset="slate"] { background: #465a92; }
+.personal #recommendation-videos { grid-template-columns: repeat(auto-fill, minmax(min(240px, 100%), 1fr)); }
+.personal[data-density="compact"] #recommendation-videos { grid-template-columns: repeat(auto-fill, minmax(min(160px, 100%), 1fr)); }
+.personal #recommendation-videos article { padding: 0; overflow: hidden; background: var(--control); }
+.personal #recommendation-videos img { display: block; border-radius: 0; }
+.personal #recommendation-videos strong { padding-inline: 10px; }
+.personal #recommendation-videos .row { padding: 2px 10px 10px; }
+.personal #recommendation-videos button { border-radius: 999px; padding: 5px 12px; }
+.personal #recommendation-videos button:first-child { background: var(--accent); color: #180a11; border-color: transparent; }
+.personal #personal-bookmarks li { padding-block: 6px; border-bottom: 1px solid var(--line); }
+@media (max-width: 850px) {
+  .personal.collapsed-media #now-playing-card { grid-template-columns: minmax(0, 1fr) auto; }
+  .personal.collapsed-media #now-playing-card .transport-controls { grid-row: 2; grid-column: 1 / -1; flex-wrap: wrap; }
+  .personal.collapsed-media #collapse-media { grid-column: 2; }
+  .personal.collapsed-media #seek { grid-row: 3; grid-column: 1 / -1; }
+}
+@media (max-width: 760px) {
+  .sidebar-brand { margin: 0; }
+  .sidebar-brand strong { display: none; }
+  .personal #personal-nav a, .personal .sidebar-action { width: auto; flex: none; white-space: nowrap; }
+  .personal #now-playing-card { top: 61px; }
+  .personal #recommendation-videos, .personal[data-density="compact"] #recommendation-videos { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .personal #recommendation-videos button { flex: 1; min-width: 0; padding-inline: 6px; }
+}

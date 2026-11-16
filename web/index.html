@@ -93,10 +93,18 @@
 </head>
 <body>
   <header class="row"><button id="toggle-settings" type="button" aria-expanded="false" aria-controls="settings-drawer">☰ Settings</button><img src="/icon.png" alt="" width="36" height="36" style="border-radius:6px"><h1>MediaBridge</h1><span id="server-version" class="muted"></span><span id="connection" class="muted grow">Connecting…</span></header>
+  <nav id="personal-nav" hidden aria-label="Dashboard">
+    <div class="sidebar-brand"><img src="/icon.png" alt="" width="30" height="30"><strong>MediaBridge</strong><button id="sidebar-toggle" type="button" aria-label="Toggle sidebar" title="Toggle sidebar">‹</button></div>
+    <a href="#dashboard" aria-label="Playback">▶ <span>Playback</span></a>
+    <a href="#personal-recommendations" aria-label="Recommendations">▤ <span>Recommendations</span></a>
+    <a href="#personal-bookmarks" aria-label="Bookmarks">☆ <span>Bookmarks</span></a>
+    <a href="#queue-card" aria-label="Queue">≡ <span>Queue</span></a>
+    <button id="personal-appearance" type="button" class="sidebar-action" aria-label="Appearance">◈ <span>Appearance</span></button>
+  </nav>
   <div id="onboarding-slot"></div>
   <section id="account-setup-card" class="card" aria-labelledby="accounts-heading">
     <h2 id="accounts-heading">Accounts</h2><p class="muted">Sign-in closes playback and this dashboard. Reopen when finished.</p>
-    <details class="help"><summary aria-label="Account sign-in help" aria-describedby="help-1">?</summary><div id="help-1" role="note">On the MediaBridge computer, use the sign-in buttons to open the persistent browser profile without playback automation. This closes the dashboard and stops current playback. After signing in, close LibreWolf and reopen the dashboard, then check whether each site's cookies can be read. YouTube can also report the active channel and profile picture. Twitch currently confirms that its sign-in cookie is present; it cannot verify the session or identify the account yet.</div></details>
+    <details class="help"><summary aria-label="Account sign-in help" aria-describedby="help-1">?</summary><div id="help-1" role="note">On the MediaBridge computer, use the sign-in buttons to open the persistent browser profile without playback automation. This closes the dashboard and stops current playback. After signing in, close LibreWolf and reopen the dashboard. Import cookies copies both sign-ins from managed LibreWolf to Obscura. On the host dashboard, each Check also refreshes the selected site before verifying its session.</div></details>
     <div class="row" style="margin:12px 0">
       <strong class="grow">YouTube</strong><img id="youtube-account-avatar" class="account-avatar hidden" alt="YouTube profile picture"><span id="youtube-account-status" class="muted" role="status">Not checked</span>
       <button type="button" data-account-login="youtube">Sign in</button><button type="button" data-account-check="youtube">Check</button>
@@ -104,13 +112,34 @@
     <div class="row" style="margin:12px 0">
       <strong class="grow">Twitch</strong><img id="twitch-account-avatar" class="account-avatar hidden" alt="Twitch profile picture"><span id="twitch-account-status" class="muted" role="status">Not checked</span>
       <button type="button" data-account-login="twitch">Sign in</button><button type="button" data-account-check="twitch">Check</button>
+
     </div>
-    <div class="row"><button id="finish-account-setup" type="button">Done</button></div>
+    <div class="row"><button id="import-account-cookies" class="hidden" type="button">Import cookies</button><button id="finish-account-setup" type="button">Done</button></div>
   </section>
   <button id="settings-backdrop" class="hidden" type="button" aria-label="Close settings"></button>
   <aside id="settings-drawer" inert role="dialog" aria-modal="true" aria-hidden="true" aria-label="Server settings">
     <div class="row"><h2 style="margin:0;flex:1">Settings</h2><button id="close-settings" type="button">Close</button></div>
     <details id="account-settings-group" class="settings-group"><summary>Accounts</summary><div id="account-settings-slot"></div></details>
+    <details class="settings-group" id="appearance-settings"><summary>Appearance</summary>
+      <label for="dashboard-view">Default dashboard view</label>
+      <select id="dashboard-view"><option value="simple">Simple</option><option value="personal">Personal</option></select>
+      <div id="personal-options" hidden>
+        <label for="dashboard-theme">Theme</label>
+        <select id="dashboard-theme"><option value="crimson">Crimson</option><option value="violet">Violet</option><option value="teal">Teal</option><option value="slate">Slate</option></select>
+        <div class="theme-swatches" aria-label="Theme presets">
+          <button type="button" data-theme-preset="crimson" aria-label="Crimson"></button>
+          <button type="button" data-theme-preset="violet" aria-label="Violet"></button>
+          <button type="button" data-theme-preset="teal" aria-label="Teal"></button>
+          <button type="button" data-theme-preset="slate" aria-label="Slate"></button>
+        </div>
+        <label for="dashboard-sidebar">Sidebar</label><select id="dashboard-sidebar"><option value="false">Expanded</option><option value="true">Compact</option></select>
+        <label for="dashboard-density">Card density</label><select id="dashboard-density"><option value="comfortable">Comfortable</option><option value="compact">Compact</option></select>
+        <label for="dashboard-feed">Recommendations</label><select id="dashboard-feed"><option value="auto">Home when idle, related during playback</option><option value="home">Always show YouTube Home</option><option value="off">Hide recommendations</option></select>
+        <label for="dashboard-opacity">Interface opacity</label><input id="dashboard-opacity" type="range" min="65" max="100">
+        <label for="dashboard-background">Wallpaper URL</label><input id="dashboard-background" type="url" placeholder="https://…">
+        <label for="wallpaper-opacity">Wallpaper opacity</label><input id="wallpaper-opacity" type="range" min="0" max="100">
+      </div>
+    </details>
     <details class="settings-group"><summary>Network access</summary><section class="card" aria-labelledby="remote-settings-heading">
       <h2 id="remote-settings-heading">Remote origin servers</h2>
       <details class="help"><summary aria-label="Allowed origins help" aria-describedby="help-2">?</summary><div id="help-2" role="note">Allow specific web apps to control this MediaBridge from a browser. Enter the site's origin (scheme, host, and optional port), without a path. Only add sites you trust.</div></details>
@@ -139,8 +168,15 @@
       <label for="cookies-profile">Browser profile (optional)</label>
       <input id="cookies-profile" type="text" placeholder="Default, Profile 1, or Firefox profile name" autocomplete="off">
       <details class="help"><summary aria-label="Browser cookie help" aria-describedby="help-6">?</summary><div id="help-6" role="note">Uses the persistent MediaBridge LibreWolf profile through yt-dlp. MediaBridge does not access your YouTube account through OAuth. Sign in from the Connect your accounts section, then check cookie access here or in that section.</div></details>
-      <div class="row"><button id="import-recommendations" class="hidden" type="button">Import YouTube sign-in for recommendations</button></div>
-      <div class="row"><button id="check-cookies" type="button">Check cookie access</button><img id="youtube-channel-avatar" class="avatar hidden" alt="YouTube channel profile picture"><span id="cookies-status" class="muted" role="status"></span></div>
+      <div class="row">
+        <label for="home-refresh-minutes">Recommendations and subscriptions background refresh</label>
+        <select id="home-refresh-minutes">
+          <option value="0">Off</option><option value="15">Every 15 minutes</option><option value="30">Every 30 minutes</option>
+          <option value="60">Every hour</option><option value="120">Every two hours</option>
+        </select>
+        <span id="home-refresh-status" role="status" class="muted"></span>
+      </div>
+      <div class="row"><button id="check-cookies" type="button">Test playback cookie source</button><img id="youtube-channel-avatar" class="avatar hidden" alt="YouTube channel profile picture"><span id="cookies-status" class="muted" role="status"></span></div>
       </details>
       <div class="row" style="margin-top:12px"><button id="save-playback-preferences" class="primary" type="button">Save defaults</button><span id="preferences-status" class="muted" role="status"></span></div>
     </section>
@@ -177,7 +213,7 @@
   </aside>
   <main id="dashboard" class="dashboard-grid">
   <section id="now-playing-card" class="card">
-    <h2>Now playing</h2>
+    <h2>Now playing</h2> <button id="collapse-media" type="button" aria-expanded="true" hidden>Collapse controls</button>
     <details id="browser-controls-note" class="help hidden"><summary aria-label="Browser playback information" aria-describedby="browser-controls-text">?</summary><div id="browser-controls-text" role="note"></div></details>
     <div id="artwork" class="artwork hidden"><img id="banner" class="banner hidden" alt="Channel banner"><img id="thumbnail" class="thumbnail hidden" alt="Video thumbnail"><img id="avatar" class="avatar hidden" alt="Channel profile picture"></div>
     <div id="title">Nothing playing</div><div id="playback-state" class="muted">Idle</div>
@@ -266,6 +302,19 @@
     <div class="row" style="margin-top:10px"><button id="set-close-timer" type="button">Set timer</button><button id="cancel-close-timer" type="button">Cancel timer</button></div>
     <p id="close-countdown" class="muted" role="status">No close countdown</p><p id="close-timer-error" class="item-error hidden" role="status"></p>
   </section>
+  <section id="personal-recommendations" class="card" hidden>
+    <div class="row"><h2 class="grow" id="recommendation-heading">Your YouTube Home</h2><button id="refresh-recommendations" type="button">Refresh</button></div>
+    <p id="recommendation-status" class="muted" role="status"></p>
+    <div id="recommendation-videos"></div>
+  </section>
+  <section id="personal-bookmarks" class="card" hidden>
+    <h2>Saved channels</h2>
+    <form id="save-channel" class="row"><input name="label" required maxlength="80" placeholder="Channel name" aria-label="Channel name"><input name="url" required type="url" placeholder="YouTube channel URL" aria-label="Channel URL"><button>Save channel</button></form>
+    <ul id="saved-channels"></ul>
+    <h2>Sunshine servers</h2>
+    <button id="save-sunshine" type="button">Bookmark entered Sunshine server</button>
+    <ul id="saved-sunshine"></ul>
+  </section>
 </main>
 <script>
   const $ = id => document.getElementById(id);
@@ -278,7 +327,7 @@
     columns.forEach(column => { column.className = 'dashboard-column'; });
     function arrangeDashboard() {
       const dashboard = $('dashboard');
-      if (narrowDashboard.matches) {
+      if (narrowDashboard.matches || document.body.classList.contains('personal')) {
         cardOrder.forEach(id => dashboard.append($(id)));
         columns.forEach(column => column.remove());
       } else {
@@ -288,6 +337,7 @@
       }
     }
     narrowDashboard.addEventListener('change', arrangeDashboard);
+    window.addEventListener('mediabridge-view-change', arrangeDashboard);
     arrangeDashboard();
   }
   const message = text => { $('message').textContent = text || ''; };
@@ -304,7 +354,6 @@
     else $('toggle-settings').focus?.();
   }
   const ACCOUNT_SETUP_KEY = 'mediabridge.account-setup-dismissed.v1';
-  const ACCOUNT_CHECKS_KEY = 'mediabridge.account-cookie-checks.v1';
   const accountSetupCard = $('account-setup-card');
   let accountSetupDismissed = false;
   try {
@@ -604,96 +653,95 @@
     } catch (error) { $('preferences-status').textContent = error.message; }
     finally { button.disabled = false; }
   };
-  if (['localhost', '127.0.0.1', '[::1]'].includes(window.location.hostname)) {
-    const button = $('import-recommendations');
-    button.classList.remove('hidden');
-    button.onclick = async () => {
-      button.disabled = true;
-      try {
-        await api('/settings/recommendations/import');
-        $('cookies-status').textContent = 'YouTube sign-in imported for recommendations.';
-      } catch (error) {
-        $('cookies-status').textContent = error.message;
-      } finally {
-        button.disabled = false;
+  if (window.matchMedia) {
+    const control = $('home-refresh-minutes');
+    const feedback = $('home-refresh-status');
+    control.disabled = true;
+    function showHomeInterval(minutes) {
+      const value = String(minutes);
+      if (![...control.options].some(option => option.value === value)) {
+        control.add(new Option(`Every ${minutes} minutes`, value));
       }
+      control.value = value;
+    }
+    api('/settings/recommendations/home', null, 'GET').then(settings => {
+      showHomeInterval(settings.refresh_minutes);
+      control.disabled = false;
+    }).catch(() => { feedback.textContent = 'Background refresh settings are unavailable on this server.'; });
+    control.onchange = async () => {
+      control.disabled = true;
+      try {
+        const settings = await api('/settings/recommendations/home', {refresh_minutes:Number(control.value)});
+        showHomeInterval(settings.refresh_minutes);
+        feedback.textContent = settings.refresh_minutes ? 'Home, subscriptions, and Twitch Live refresh on this interval.' : 'Background refresh is off. Subscription feeds refresh on request.';
+      } catch (error) { feedback.textContent = error.message; }
+      finally { control.disabled = false; }
     };
   }
+  const onAccountHost = !window.__mediabridgePreviewSettings && ['localhost', '127.0.0.1', '[::1]'].includes(window.location.hostname);
+  const importCookies = $('import-account-cookies');
+  const accountChecks = [...document.querySelectorAll('[data-account-check]')];
+  function importAccountCookies(site) {
+    return api(site === 'youtube' ? '/settings/recommendations/import' : '/settings/recommendations/import/twitch');
+  }
+  async function runAccountAction(action) {
+    const buttons = [importCookies, ...accountChecks];
+    buttons.forEach(button => button.disabled = true);
+    try { await action(); }
+    finally { buttons.forEach(button => button.disabled = false); }
+  }
+  if (onAccountHost) {
+    importCookies.classList.remove('hidden');
+    importCookies.onclick = () => runAccountAction(() => Promise.all(['youtube', 'twitch'].map(async site => {
+      const status = $(`${site}-account-status`);
+      status.textContent = 'Importing…';
+      try {
+        await importAccountCookies(site);
+        status.textContent = 'Imported from LibreWolf';
+      } catch (error) { status.textContent = 'Import failed: ' + error.message; }
+    })));
+  }
   $('check-cookies').onclick = async () => {
-    const button = $('check-cookies'); button.disabled = true; $('cookies-status').textContent = 'Checking browser profile access and YouTube…';
+    const button = $('check-cookies'), status = $('cookies-status');
+    button.disabled = true;
+    status.textContent = 'Checking playback cookie access…';
     try {
-      const result = await checkAccountCookies('youtube');
-      $('cookies-status').textContent = result.channel_name
-        ? `Cookies loaded successfully from ${result.browser}. YouTube channel: ${result.channel_name}.`
-        : `Cookies read successfully from ${result.browser}, but YouTube did not provide channel profile details${result.channel_lookup_error ? `: ${result.channel_lookup_error}` : '.'}`;
-    } catch (error) { $('cookies-status').textContent = 'Could not confirm cookie access: ' + error.message; }
+      const result = await api('/settings/cookies/check', {site:'youtube', cookies_browser:$('cookies-browser').value, cookies_profile:$('cookies-profile').value.trim() || null});
+      status.textContent = result.channel_name ? `Signed in as ${result.channel_name}` : `Cookies read from ${result.browser}`;
+      if (result.channel_avatar_url) {
+        const avatar = $('youtube-channel-avatar');
+        avatar.src = result.channel_avatar_url;
+        avatar.classList.remove('hidden');
+      }
+    } catch (error) { status.textContent = 'Could not confirm cookie access: ' + error.message; }
     finally { button.disabled = false; }
   };
   async function checkAccountCookies(site) {
-    const avatar = $(`${site}-account-avatar`), status = $(`${site}-account-status`);
-    avatar.removeAttribute('src'); avatar.classList.add('hidden'); status.textContent = 'Checking…';
-    function readSavedChecks() {
-      try {
-        const value = JSON.parse(localStorage.getItem(ACCOUNT_CHECKS_KEY) || '{}');
-        return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
-      } catch (_) { return {}; }
-    }
-    function saveCheck(record) {
-      try {
-        const saved = readSavedChecks();
-        saved[site] = record;
-        localStorage.setItem(ACCOUNT_CHECKS_KEY, JSON.stringify(saved));
-      } catch (_) {}
-    }
+    const status = $(`${site}-account-status`);
+    status.removeAttribute('title');
+    status.textContent = 'Checking…';
     try {
-      const saved = readSavedChecks();
-      delete saved[site];
-      localStorage.setItem(ACCOUNT_CHECKS_KEY, JSON.stringify(saved));
-    } catch (_) {}
-    try {
-      const result = await api('/settings/cookies/check', {site, cookies_browser:$('cookies-browser').value, cookies_profile:$('cookies-profile').value.trim() || null});
-      if (site === 'youtube') {
-        status.textContent = result.channel_name ? `Signed in as ${result.channel_name}` : `Cookies confirmed in ${result.browser}`;
-        if (result.channel_avatar_url) { avatar.src = result.channel_avatar_url; avatar.classList.remove('hidden'); }
-        const settingsStatus = result.channel_name
-          ? `Cookies loaded successfully from ${result.browser}. YouTube channel: ${result.channel_name}.`
-          : `Cookies read successfully from ${result.browser}, but YouTube did not provide channel profile details${result.channel_lookup_error ? `: ${result.channel_lookup_error}` : '.'}`;
-        $('cookies-status').textContent = settingsStatus;
-        saveCheck({status: status.textContent, settings_status: settingsStatus, avatar: result.channel_avatar_url || null, checked_at: new Date().toISOString()});
-      } else {
-        status.textContent = result.profile_name
-          ? `Twitch auth cookie found (${result.profile_name}); session not validated`
-          : 'Twitch auth cookie found; session not validated';
-        saveCheck({status: status.textContent, avatar: null, checked_at: new Date().toISOString()});
+      if (onAccountHost) await importAccountCookies(site);
+      const result = await api(`/subscriptions/${site}`, null, 'GET');
+      if (result.signed_in !== true || !Array.isArray(result.channels)) {
+        throw new Error('Obscura did not confirm the session.');
       }
-      avatar.onerror = () => { avatar.removeAttribute('src'); avatar.classList.add('hidden'); };
-      return result;
+      status.textContent = site === 'twitch' ? 'Twitch Following verified in Obscura' : 'YouTube subscriptions verified in Obscura';
+      if (site === 'youtube') {
+        const identity = await api('/settings/cookies/check', {site, cookies_browser:'librewolf'}).catch(() => null);
+        if (identity?.channel_name) status.textContent += ` · ${identity.channel_name}`;
+        if (identity?.channel_avatar_url) {
+          const avatar = $('youtube-account-avatar');
+          avatar.onerror = () => avatar.classList.add('hidden');
+          avatar.src = identity.channel_avatar_url;
+          avatar.classList.remove('hidden');
+        }
+      }
     } catch (error) {
       status.textContent = 'Not confirmed: ' + error.message;
-      if (site === 'youtube') $('cookies-status').textContent = 'Could not confirm cookie access: ' + error.message;
-      saveCheck({status: status.textContent, settings_status: site === 'youtube' ? $('cookies-status').textContent : null, avatar: null, checked_at: new Date().toISOString()});
       throw error;
     }
   }
-  try {
-    const savedChecks = JSON.parse(localStorage.getItem(ACCOUNT_CHECKS_KEY) || '{}');
-    for (const site of ['youtube', 'twitch']) {
-      const saved = savedChecks?.[site];
-      if (!saved || typeof saved.status !== 'string') continue;
-      $(`${site}-account-status`).textContent = saved.status;
-      const checkedAt = Date.parse(saved.checked_at || '');
-      if (Number.isFinite(checkedAt)) $(`${site}-account-status`).title = `Last checked ${new Date(checkedAt).toLocaleString()}`;
-      if (site === 'youtube' && typeof saved.settings_status === 'string') $('cookies-status').textContent = saved.settings_status;
-      if (site === 'youtube' && typeof saved.avatar === 'string' && saved.avatar.startsWith('https://')) {
-        const avatar = $('youtube-account-avatar');
-        avatar.src = saved.avatar;
-        avatar.classList.remove('hidden');
-        avatar.onerror = () => { avatar.removeAttribute('src'); avatar.classList.add('hidden'); };
-        $('youtube-channel-avatar').src = saved.avatar;
-        $('youtube-channel-avatar').classList.remove('hidden');
-      }
-    }
-  } catch (_) {}
   document.querySelectorAll('[data-account-login]').forEach(button => button.onclick = async () => {
     const site = button.dataset.accountLogin;
     const label = site === 'youtube' ? 'YouTube' : 'Twitch';
@@ -707,20 +755,35 @@
       document.querySelectorAll('[data-account-login]').forEach(item => item.disabled = false);
     }
   });
-  document.querySelectorAll('[data-account-check]').forEach(button => button.onclick = () => checkAccountCookies(button.dataset.accountCheck).catch(() => {}));
+  accountChecks.forEach(button => button.onclick = () => runAccountAction(() => checkAccountCookies(button.dataset.accountCheck).catch(() => {})));
   let sunshinePairPoll = null;
+  let pendingSunshineStream = null;
   async function pollSunshinePairing(host) {
+    const poll = sunshinePairPoll;
     try {
       const result = await api('/sunshine/pair/status', null, 'GET');
-      if (result.host && result.host.toLowerCase() !== host.toLowerCase()) return;
+      if (poll !== sunshinePairPoll || (result.host && result.host.toLowerCase() !== host.toLowerCase())) return;
       if (result.state === 'paired') {
-        rememberSunshineHost(host);
-        $('sunshine-status').textContent = `Pairing with ${host} was confirmed.`;
+        const stream = pendingSunshineStream;
+        pendingSunshineStream = null;
         clearInterval(sunshinePairPoll); sunshinePairPoll = null;
+        rememberSunshineHost(host);
+        if (stream && stream.host === host) {
+          try { await launchSunshineStream(stream); }
+          finally {
+            $('sunshine-connect').disabled = false;
+            $('sunshine-pair').disabled = false;
+          }
+          return;
+        }
+        $('sunshine-pair').disabled = false;
+        $('sunshine-status').textContent = `Pairing with ${host} was confirmed.`;
       } else if (result.state === 'failed') {
         $('sunshine-status').textContent = result.error || 'Pairing did not complete.';
         clearInterval(sunshinePairPoll); sunshinePairPoll = null;
         $('sunshine-pair').disabled = false;
+        pendingSunshineStream = null;
+        $('sunshine-connect').disabled = false;
       } else if (result.state === 'waiting') {
         $('sunshine-status').textContent = result.message === 'Verifying the pairing'
           ? `PIN accepted. Verifying the saved Moonlight pairing with ${host}…`
@@ -729,11 +792,15 @@
         clearInterval(sunshinePairPoll); sunshinePairPoll = null;
         $('sunshine-status').textContent = 'Pairing was closed before it could be confirmed.';
         $('sunshine-pair').disabled = false;
+        pendingSunshineStream = null;
+        $('sunshine-connect').disabled = false;
       }
     } catch (error) {
       $('sunshine-status').textContent = error.message;
       clearInterval(sunshinePairPoll); sunshinePairPoll = null;
       $('sunshine-pair').disabled = false;
+      pendingSunshineStream = null;
+      $('sunshine-connect').disabled = false;
     }
   }
   async function resumeSunshinePairing() {
@@ -765,15 +832,40 @@
       button.disabled = false;
     }
   };
+  async function launchSunshineStream({host, app}) {
+    await api('/sunshine', {host, app});
+    $('sunshine-status').textContent = `Moonlight was launched for ${host} (${app}).`;
+  }
   $('sunshine-connect').onclick = async () => {
-    const host = $('sunshine-host').value.trim(), app = $('sunshine-app').value.trim() || 'Desktop', button = $('sunshine-connect');
+    const host = $('sunshine-host').value.trim();
+    const app = $('sunshine-app').value.trim() || 'Desktop';
+    const button = $('sunshine-connect');
     if (!host) { $('sunshine-status').textContent = 'Enter the Sunshine PC IP address or host name.'; return; }
-    button.disabled = true; $('sunshine-status').textContent = 'Starting Moonlight…';
+    if (sunshinePairPoll) {
+      $('sunshine-status').textContent = 'Finish the current pairing before connecting.';
+      return;
+    }
+    button.disabled = true;
+    $('sunshine-pair').disabled = true;
+    $('sunshine-status').textContent = 'Checking Moonlight pairing…';
     try {
-      await api('/sunshine', {host, app});
-      $('sunshine-status').textContent = `Moonlight was launched for ${host} (${app}). If it reports that this PC is not paired, select Pair first.`;
-    } catch (error) { $('sunshine-status').textContent = error.message; }
-    finally { button.disabled = false; }
+      const result = await api('/sunshine/check', {host});
+      if (result.paired) {
+        await launchSunshineStream({host, app});
+      } else {
+        await api('/sunshine/pair', {host});
+        pendingSunshineStream = {host, app};
+        sunshinePairPoll = setInterval(() => pollSunshinePairing(host), 1200);
+        await pollSunshinePairing(host);
+      }
+    } catch (error) {
+      $('sunshine-status').textContent = error.message;
+    } finally {
+      if (!pendingSunshineStream) {
+        button.disabled = false;
+        $('sunshine-pair').disabled = false;
+      }
+    }
   };
   fetch('/settings/port', {cache:'no-store'}).then(response => response.ok ? response.json() : null).then(data => {
     if (data?.port) $('server-port').value = String(data.port);
@@ -1088,6 +1180,7 @@
       const response = await fetch('/status', {cache:'no-store'});
       if (!response.ok) throw new Error('status unavailable');
       const state = await response.json();
+      window.updatePersonalDashboard?.(state);
       $('server-version').textContent = state.version ? `v${state.version} · ${state.server_build || 'unknown build'}` : 'Unversioned server';
       $('server-version').title = 'Running server version and source fingerprint (excludes packaging and runtime)';
       renderTracks(state);
@@ -1130,9 +1223,9 @@
       $('clear-autoplay-error').classList.toggle('hidden', !state.autoplay_error);
       $('playback-error').textContent = state.playback_error || '';
       $('playback-error').classList.toggle('hidden', !state.playback_error);
-      const hasBanner = setImage($('banner'), state.channel_banner_url);
-      const hasThumbnail = setImage($('thumbnail'), state.artwork_url);
-      const hasAvatar = setImage($('avatar'), state.channel_avatar_url);
+      const hasBanner = setImage($('banner'), document.body.classList.contains('personal') ? state.channel_banner_url : null);
+      const hasThumbnail = setImage($('thumbnail'), document.body.classList.contains('personal') ? state.artwork_url : null);
+      const hasAvatar = setImage($('avatar'), document.body.classList.contains('personal') ? state.channel_avatar_url : null);
       $('artwork').classList.toggle('hidden', !(hasBanner || hasThumbnail || hasAvatar));
       const duration = Number(state.duration_seconds) || 0, position = Number(state.position_seconds) || 0;
       $('duration').textContent = time(duration); $('position').textContent = time(position);
@@ -1147,14 +1240,15 @@
       const order = JSON.stringify(historyItems.map(item => item.url));
       if (order !== historyOrder) { historySelection.clear(); historyOrder = order; }
       renderHistory();
-      const queueSignature = JSON.stringify(state.queue_items || state.queued || []);
+      const artworkEnabled = document.body.classList.contains('personal');
+      const queueSignature = JSON.stringify([artworkEnabled, state.queue_items || state.queued || []]);
       if (queueSignature !== renderedQueue) {
       renderedQueue = queueSignature;
       const list = $('queue'); list.replaceChildren();
       if (!state.queued?.length) { const li = document.createElement('li'); li.className = 'muted'; li.textContent = 'Queue is empty'; list.append(li); }
       else (state.queue_items || state.queued.map(url => ({url}))).forEach((item, index, items) => {
         const li = document.createElement('li'), details = document.createElement('div');
-        if (item.thumbnail_url) { const image = document.createElement('img'); image.className = 'queue-art'; image.alt = ''; setImage(image, item.thumbnail_url); li.append(image); }
+        if (artworkEnabled && item.thumbnail_url) { const image = document.createElement('img'); image.className = 'queue-art'; image.alt = ''; setImage(image, item.thumbnail_url); li.append(image); }
         const name = document.createElement('strong'); name.textContent = item.title || item.url; details.append(name);
         appendSourceHelp(details, item.url);
         const sub = document.createElement('div'); sub.className = 'muted';
@@ -1184,7 +1278,9 @@
     $('quality').value = ['480', '720', '1080', '1440', '2160'].includes(String(preferences.default_quality)) ? String(preferences.default_quality) : '720';
     $('subtitles').checked = !!preferences.subtitles;
   }).catch(() => {});
-  refresh(); setInterval(refresh, 1000);
+  refresh();
+  if (!window.__mediabridgeEmbeddedSettings) setInterval(refresh, 1000);
 </script>
+<script src="/dashboard-view.js" defer></script>
 </body>
 </html>

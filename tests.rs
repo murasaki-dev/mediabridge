@@ -690,6 +690,39 @@ fn post(state: &mut State, path: &str, body: &'static str) {
     handle(request.into(), &cfg, state);
 }
 
+#[cfg(feature = "native-dashboard")]
+#[test]
+fn native_dashboard_routes_and_status_alias_work_over_http() {
+    let server = Server::http("127.0.0.1:0").unwrap();
+    let address = server.server_addr().to_ip().unwrap();
+    let worker = thread::spawn(move || {
+        let config = test_config();
+        let mut state = State::default();
+        for _ in 0..11 {
+            let request = server.recv_timeout(Duration::from_secs(5)).unwrap().expect("dashboard smoke HTTP request");
+            handle(request, &config, &mut state);
+        }
+    });
+    let client = reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(5)).build().unwrap();
+    let get = |path: &str| client.get(format!("http://{address}{path}")).send().unwrap().error_for_status().unwrap();
+    let shell = get("/").text().unwrap();
+    assert!(shell.contains("/_app/immutable/"));
+    assert_eq!(get("/settings").text().unwrap(), shell);
+    assert_eq!(get("/mousepad").text().unwrap(), shell);
+    assert_eq!(get("/search").text().unwrap(), shell);
+    assert_eq!(get("/chat").text().unwrap(), shell);
+    let status = |path: &str| client.get(format!("http://{address}{path}")).send().unwrap().status().as_u16();
+    assert_eq!(status("/api/search/youtube"), 400);
+    assert_eq!(status("/api/chat/youtube-live?id=invalid"), 400);
+    let settings = get("/host-settings").text().unwrap();
+    assert!(settings.contains("__mediabridgeEmbeddedSettings"));
+    assert!(get("/legacy-dashboard").text().unwrap().contains("settings-drawer"));
+    let legacy: serde_json::Value = get("/status").json().unwrap();
+    let dashboard: serde_json::Value = get("/api/status").json().unwrap();
+    assert_eq!(dashboard, legacy);
+    worker.join().unwrap();
+}
+
 #[test]
 fn batch_routes_preserve_order_and_validate_before_mutation() {
     let mut state = State::default();
@@ -749,7 +782,7 @@ fn stale_autoplay_results_cannot_fill_queue() {
     state.autoplay_generation = 2;
     state.current = Some(item("https://www.youtube.com/watch?v=abcdefghijk", false));
     state.autoplay_rx = Some(rx);
-    tx.send((1, state.current.as_ref().unwrap().url.clone(), Ok(vec![recommendations::Video { url: "https://www.youtube.com/watch?v=lmnopqrstuv".into(), title: None }]))).unwrap();
+    tx.send((1, state.current.as_ref().unwrap().url.clone(), Ok(vec![recommendations::Video { url: "https://www.youtube.com/watch?v=lmnopqrstuv".into(), title: None, uploader: None, published: None, avatar_url: None, duration_seconds: None }]))).unwrap();
     drain_autoplay_results(&mut state);
     assert!(state.queue.is_empty());
 }

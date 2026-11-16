@@ -1,0 +1,23 @@
+:root {color:var(--md-sys-color-on-surface,#edf2f7);background:transparent;font:14px/1.5 system-ui,sans-serif;overflow:hidden}
+body {padding:0 !important;margin:0 !important;max-width:none;background:transparent;overflow:hidden !important}
+body > :not(#settings-drawer):not(script) {display:none !important}
+#settings-drawer {display:grid;gap:20px;position:relative;inset:auto;width:100%;max-width:none;padding:0;
+  border:0;box-shadow:none;background:transparent;overflow:visible;transform:none;visibility:visible;transition:none}
+#settings-drawer > .row:first-child,#settings-drawer #appearance-settings {display:none}
+#settings-drawer .dashboard-mode-setting {display:flex;align-items:center;justify-content:space-between;gap:12px}
+#settings-drawer .settings-group,#settings-drawer > .card {
+  margin:0;padding:18px;border:1px solid var(--md-sys-color-outline-variant,#303945) !important;border-radius:16px;
+  background:color-mix(in srgb,var(--md-sys-color-surface-container,#1a2029) calc(var(--panel-opacity,.94) * 100%),transparent);
+  color:var(--md-sys-color-on-surface,#edf2f7)}
+#settings-drawer .settings-group > summary[hidden] {display:none}
+#settings-drawer .settings-group > .settings-heading {display:block;margin:0 0 12px;font-size:1.2rem;font-weight:700;letter-spacing:-.02em}
+#settings-drawer .settings-group > .card {margin:0}
+#settings-drawer .help > [role=note] {position:absolute;inset:28px auto auto 0;
+  background:var(--md-sys-color-surface-container-high,#1a2029);color:var(--md-sys-color-on-surface,#edf2f7)}
+#settings-drawer summary,#settings-drawer .muted {color:var(--md-sys-color-on-surface-variant,#a4afbd)}
+#settings-drawer summary:hover {color:var(--md-sys-color-primary,#74cfff)}
+#settings-drawer :is(input,select,textarea,button) {border-color:var(--md-sys-color-outline-variant,#465363);border-radius:12px}
+#settings-drawer :is(input,select,textarea) {background:var(--md-sys-color-surface-container-low,#121820);accent-color:var(--md-sys-color-primary,#74cfff)}
+#settings-drawer button {background:var(--md-sys-color-secondary-container,#283443);color:var(--md-sys-color-on-secondary-container,#edf2f7)}
+#settings-drawer button:hover:enabled {background:var(--md-sys-color-surface-container-highest,#35465b)}
+#settings-drawer :focus-visible {outline-color:var(--md-sys-color-primary,#74cfff)}

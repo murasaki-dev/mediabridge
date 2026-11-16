@@ -24,25 +24,42 @@ const nodes = new Map([...html.matchAll(/\bid="([^"]+)"/g)].map(match => [match[
 const node = id => { assert(nodes.has(id), `Unknown dashboard ID ${id}`); return nodes.get(id); };
 node('mode').value = 'local'; node('quality').value = '720'; node('browser').value = 'librewolf';
 const posts = [];
+let twitchFollowing = {signed_in:true, channels:[]};
+let pairingState = 'waiting';
 let state = {queue_items:[], queued:[], history_items:[], can_seek:true, hardware_decoder:'software', autoplay_enabled:true,
   autoplay_loading:true, autoplay_status:'Checking current video', autoplay_error:'Lookup failed'};
 const context = vm.createContext({document:{getElementById:node, createElement:()=>new Element(), createTextNode:text=>text,
   querySelectorAll:()=>[], addEventListener(){}, body:new Element()},
-  localStorage:{getItem:()=>null,setItem(){}}, window:{location:{href:'http://localhost/'},setTimeout(){}},
-  URL, Event, console, setInterval(){}, setTimeout(){}, clearTimeout(){},
+  localStorage:{getItem:()=>null,setItem(){}}, window:{location:{href:'http://localhost/',hostname:'localhost'},setTimeout(){}},
+  URL, Event, console, setInterval(){ return 1; }, clearInterval(){}, setTimeout(){}, clearTimeout(){},
   fetch:async (path, options={}) => {
     if (options.method === 'POST') posts.push({path, body:options.body ? JSON.parse(options.body) : null});
     let data = {};
     if (path === '/status') data = state;
+    if (path === '/sunshine/check') data = {paired:false};
+    if (path === '/sunshine/pair/status') data = {state:pairingState, host:'sunshine.local'};
     if (path === '/platform') data = {os:'windows'};
     if (path === '/settings/autostart') data = {supported:true,enabled:false,requested:false,pending:false,error:null};
     if (path === '/preferences' || path === '/settings/preferences') data = {default_quality:'720', default_video_codec:'h264',cookies_browser:'off'};
     if (path === '/settings/remote-origins') data = {remote_origin_servers:[]};
     if (path === '/queue_batch') data = {added:JSON.parse(options.body).items.length};
+    if (path === '/subscriptions/twitch' && options.method === 'GET') data = twitchFollowing;
     return {ok:true, json:async()=>data};
   }});
 vm.runInContext(html.match(/<script>([\s\S]*?)<\/script>/)[1], context);
 async function run() {
+  node('sunshine-host').value = 'sunshine.local';
+  node('sunshine-app').value = 'Steam';
+  await node('sunshine-connect').onclick();
+  assert.deepEqual(posts.slice(-2).map(post => post.path), ['/sunshine/check', '/sunshine/pair']);
+  assert.equal(posts.some(post => post.path === '/sunshine'), false);
+  pairingState = 'paired';
+  await vm.runInContext("pollSunshinePairing('sunshine.local')", context);
+  assert.deepEqual(posts.at(-1), {path:'/sunshine', body:{host:'sunshine.local', app:'Steam'}});
+  pairingState = 'failed';
+  await node('sunshine-connect').onclick();
+  assert.equal(posts.filter(post => post.path === '/sunshine').length, 1);
+  assert.equal(node('sunshine-connect').disabled, false);
   vm.runInContext('renderDesktopMouse({supported:true,backend:"portal",pending:true,enabled:false})', context);
   assert.equal(node('enable-desktop-mouse').disabled, true);
   assert.match(node('desktop-mouse-status').textContent, /Approve/);
@@ -64,6 +81,16 @@ async function run() {
   vm.runInContext('renderAutostart({supported:true,enabled:false,requested:true,pending:true})',context);
   assert.equal(node('autostart-enabled').disabled,true);
   assert.match(node('autostart-status').textContent,/approval/);
+  await node('import-account-cookies').onclick();
+  assert.deepEqual(posts.slice(-2).map(post => post.path), [
+    '/settings/recommendations/import', '/settings/recommendations/import/twitch',
+  ]);
+  assert.equal(node('twitch-account-status').textContent, 'Imported from LibreWolf');
+  await vm.runInContext("checkAccountCookies('twitch')", context);
+  assert.equal(posts.at(-1).path, '/settings/recommendations/import/twitch');
+  assert.equal(node('twitch-account-status').textContent, 'Twitch Following verified in Obscura');
+  twitchFollowing = {signed_in:false, channels:[]};
+  await assert.rejects(vm.runInContext("checkAccountCookies('twitch')", context), /did not confirm/);
   node('autostart-enabled').checked=false;
   await node('autostart-enabled').onchange();
   assert(posts.some(post=>post.path==='/settings/autostart' && post.body.enabled===false));

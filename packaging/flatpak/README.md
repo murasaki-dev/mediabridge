@@ -77,19 +77,44 @@ The build checks driver files and linked libraries without needing a GPU.
 This diagnostic checks the installed sandbox; the dashboard's decoder indicator
 during actual playback confirms whether mpv is using hardware decoding.
 
-## Build on Fedora
+## Build on Arch or Fedora
 
-Copy the complete source folder, including the local build scripts, to x86_64
-Fedora. From its root, as your normal user:
+On the Gitea network, download `build-flatpak-from-gitea.sh` from
+[MediaBridge on Gitea](http://192.168.0.199:3000/homelab/mediabridge) and run:
 
 ```sh
-sudo dnf install podman flatpak python3 tar
+sudo pacman -Syu --needed git podman fuse-overlayfs flatpak python tar
+bash build-flatpak-from-gitea.sh
+```
+
+Run the launcher from the directory where you want the build. It fetches
+Gitea's `main` into `./mediabridge-flatpak-source/` and copies both bundles,
+`install-flatpak.sh`, and `start-flatpak.sh` into `./dist/flatpak/`.
+Pass `--install` to install on the laptop, or copy the four release files to
+the server. Set `MEDIABRIDGE_FLATPAK_SOURCE` to reuse an existing checkout.
+
+For a local source tree, run the build directly from its root. On Fedora,
+install the prerequisites with `sudo dnf install git podman flatpak python3 tar`.
+
+```sh
 bash build-flatpak.sh             # build only
 # Or: bash build-flatpak.sh --install
 ```
 
-Only the prerequisite command uses sudo. The disposable Fedora 44 build container
-needs internet and several GB of disk space. Both bundles, both helpers and
+Rootless Podman must work for your user. If `podman info` fails due to missing
+subordinate IDs, see [Podman's rootless setup](https://github.com/containers/podman/blob/main/docs/tutorials/rootless_tutorial.md).
+If Podman still reports unsupported overlay storage after installing
+`fuse-overlayfs`, use a separate VFS store for the build:
+
+```sh
+MEDIABRIDGE_FLATPAK_STORAGE=vfs bash build-flatpak-from-gitea.sh
+```
+
+VFS can use more disk space than overlay and keeps its build image cache under
+`${XDG_DATA_HOME:-$HOME/.local/share}/mediabridge-flatpak-podman/`.
+
+The disposable Fedora 44 build container needs internet and several GB of disk
+space. Both bundles, both helpers and
 `build.log` appear under `dist/flatpak/`. Distribute all four release files together.
 
 If downloads work on the host but Podman reports `Network is unreachable`, use:

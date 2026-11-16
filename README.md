@@ -2,6 +2,10 @@
 
 Control media on a Windows or Linux PC from another device on your LAN. MediaBridge provides a browser dashboard and HTTP API for browser video, local mpv playback, and Sunshine/Moonlight streaming.
 
+The dashboard opens in **Simple** mode on first use. Choose **Fancy** in
+**Settings → Dashboard → Dashboard mode** for recommendations, subscriptions,
+history, and appearance controls. The choice is saved in each browser.
+
 ## What it does
 
 - Play web links in a managed LibreWolf browser or directly with mpv and yt-dlp.
@@ -64,7 +68,7 @@ For Sunshine streaming, select **Sunshine / Moonlight**, start pairing, and ente
 
 The API has **no authentication or HTTPS**. Use it on a trusted LAN; anyone who can reach its port can control the host. The browser-origin allowlist is not user authentication. After changing the port, update the host firewall rule as needed.
 
-To personalize recommendations, sign in to YouTube in managed LibreWolf and close the browser. On the MediaBridge host, open the dashboard at http://127.0.0.1:8765/ and use **Settings → Import YouTube sign-in for recommendations**. Obscura stores its own local session. Import again if YouTube expires it. A signed-out profile uses public recommendations.
+To personalize recommendations, sign in to YouTube in managed LibreWolf and close the browser. On the MediaBridge host, open the dashboard at http://127.0.0.1:8765/ and use **Settings → Accounts → Import cookies**. Obscura stores its own local session. Import again if YouTube expires it. A signed-out profile uses public recommendations.
 
 ## Integrate
 

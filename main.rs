@@ -4,6 +4,8 @@
 #![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
 mod recommendations;
+#[cfg(feature = "native-dashboard")]
+mod dashboard;
 
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
@@ -137,6 +139,7 @@ struct Config {
 #[serde(default)]
 struct UserConfig {
     bind: String,
+    youtube_home_refresh_minutes: u64,
     remote_origin_servers: Vec<String>,
     default_screen: Option<u8>,
     default_quality: Option<String>,
@@ -152,6 +155,7 @@ impl Default for UserConfig {
     fn default() -> Self {
         Self {
             bind: "0.0.0.0:8765".into(),
+            youtube_home_refresh_minutes: 30,
             remote_origin_servers: Vec::new(),
             default_screen: None,
             default_quality: Some("720".into()),
@@ -1064,6 +1068,10 @@ fn ensure_librewolf_profile(profile: &Path) -> Result<(), String> {
     let prefs = profile.join("user.js");
     let existing = std::fs::read_to_string(&prefs).unwrap_or_default();
     let required = [
+        ("dom.webnotifications.enabled", "user_pref(\"dom.webnotifications.enabled\", false);\n"),
+        ("permissions.default.desktop-notification", "user_pref(\"permissions.default.desktop-notification\", 2);\n"),
+        ("browser.toolbars.bookmarks.visibility", "user_pref(\"browser.toolbars.bookmarks.visibility\", \"never\");\n"),
+        ("toolkit.legacyUserProfileCustomizations.stylesheets", "user_pref(\"toolkit.legacyUserProfileCustomizations.stylesheets\", true);\n"),
         ("privacy.clearOnShutdown.cookies", "user_pref(\"privacy.clearOnShutdown.cookies\", false);\n"),
         ("privacy.clearOnShutdown_v2.cookiesAndStorage", "user_pref(\"privacy.clearOnShutdown_v2.cookiesAndStorage\", false);\n"),
         ("privacy.sanitize.sanitizeOnShutdown", "user_pref(\"privacy.sanitize.sanitizeOnShutdown\", false);\n"),
@@ -1084,6 +1092,20 @@ fn ensure_librewolf_profile(profile: &Path) -> Result<(), String> {
             .map_err(|error| format!("could not configure the persistent LibreWolf profile: {error}"))?;
         if existing.is_empty() { file.write_all(b"// MediaBridge browser settings.\n").ok(); }
         file.write_all(missing.as_bytes()).map_err(|error| format!("could not configure the persistent LibreWolf profile: {error}"))?;
+    }
+    const FRESH_STARTUP: &str = "\n// MediaBridge fresh startup\nuser_pref(\"browser.startup.page\", 1);\nuser_pref(\"browser.sessionstore.resume_from_crash\", false);\n";
+    if !existing.contains("// MediaBridge fresh startup") {
+        std::fs::OpenOptions::new().create(true).append(true).open(&prefs)
+            .and_then(|mut file| file.write_all(FRESH_STARTUP.as_bytes()))
+            .map_err(|e| format!("could not configure LibreWolf startup: {e}"))?;
+    }
+    let chrome = profile.join("chrome");
+    std::fs::create_dir_all(&chrome).map_err(|e| format!("could not configure LibreWolf toolbar: {e}"))?;
+    let stylesheet = chrome.join("userChrome.css");
+    if !std::fs::read_to_string(&stylesheet).unwrap_or_default().contains("MediaBridge navigation bar") {
+        std::fs::OpenOptions::new().create(true).append(true).open(stylesheet)
+            .and_then(|mut file| file.write_all(b"\n/* MediaBridge navigation bar */\n#main-window:not([customizing]) #nav-bar:not(:focus-within) { max-height: 0 !important; min-height: 0 !important; overflow: hidden !important; }\n"))
+            .map_err(|e| format!("could not configure LibreWolf toolbar: {e}"))?;
     }
     Ok(())
 }
@@ -1735,7 +1757,7 @@ fn drain_autoplay_results(state: &mut State) {
             Ok(videos) => {
                 let Some(template) = state.current.clone() else { continue; };
                 let mut added = 0usize;
-                for recommendations::Video {url, title} in videos {
+                for recommendations::Video {url, title, uploader, duration_seconds, ..} in videos {
                     let Some(id) = youtube_video_id(&url) else { continue; };
                     if state.autoplay_seen_ids.contains(&id)
                         || state.current.as_ref().is_some_and(|item| same_media_url(&item.url, &url))
@@ -1749,7 +1771,7 @@ fn drain_autoplay_results(state: &mut State) {
                     item.smb_share_id = None;
                     item.smb_credentials = None;
                     item.metadata_error = None;
-                    item.title = title; item.uploader = None; item.thumbnail_url = None; item.duration_seconds = None;
+                    item.title = title; item.uploader = uploader; item.thumbnail_url = None; item.duration_seconds = duration_seconds.map(|seconds| seconds as f64);
                     item.channel_avatar_url = None; item.channel_banner_url = None;
                     item.autoplay_generated = true;
                     state.pending_queue_metadata.push_back(item.url.clone());
@@ -4456,14 +4478,15 @@ fn handle_dial(mut request:Request,cfg:&Config,state:&mut State) {
 
 fn handle(mut request: Request, cfg: &Config, state: &mut State) {
     let method = request.method().clone();
-    let path = request.url().split('?').next().unwrap_or("/").to_string();
+    let raw_path = request.url().split('?').next().unwrap_or("/");
+    let path = raw_path.strip_prefix("/api").filter(|path| path.starts_with('/')).unwrap_or(raw_path).to_string();
     if path.starts_with("/dial/") {handle_dial(request,cfg,state);return;}
     if let Some(origin) = request.headers().iter().find(|h| h.field.equiv("Origin")).map(|h| h.value.as_str()) {
         let local_origin = request.headers().iter().find(|h| h.field.equiv("Host"))
             .map(|h| format!("http://{}", h.value.as_str()));
         let allowed_remote = remote_origin_allowed(origin);
         let local_dashboard = local_origin.as_deref() == Some(origin);
-        if (!allowed_remote && !local_dashboard) || (path.starts_with("/settings/") && !local_dashboard) {
+        if (!allowed_remote && !local_dashboard) || ((path.starts_with("/settings/") || path == "/appearance/wallpaper") && !local_dashboard) {
             respond(request, 403, "{\"error\":\"origin is not allowed\"}".into(), "application/json");
             return;
         }
@@ -4472,7 +4495,137 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         respond(request, 204, String::new(), "text/plain; charset=utf-8");
         return;
     }
+    #[cfg(feature = "native-dashboard")]
+    {
+        if method == Method::Get && matches!(path.as_str(), "/search/youtube" | "/chat/youtube-live") {
+            let search = path == "/search/youtube";
+            thread::spawn(move || dashboard::youtube_public(request, search));
+            return;
+        }
+        if path == "/appearance/wallpaper" {
+            thread::spawn(move || dashboard::wallpaper(request));
+            return;
+        }
+        if method == Method::Get && path == "/host-settings" {
+            dashboard::embedded_settings(request);
+            return;
+        }
+        if matches!(method, Method::Get | Method::Head) && dashboard::is_asset_route(&path) {
+            dashboard::serve_asset(request, &path);
+            return;
+        }
+    }
 
+    if method == Method::Get && path == "/artwork/channel" {
+        let url = request.url().split_once('?').and_then(|(_, query)| {
+            reqwest::Url::parse(&format!("http://127.0.0.1/?{query}")).ok()
+        }).and_then(|url| url.query_pairs().find(|(key, _)| key == "url").map(|(_, value)| value.into_owned()));
+        let Some(url) = url else {
+            respond(request, 400, "{\"error\":\"Missing channel icon URL\"}".into(), "application/json");
+            return;
+        };
+        thread::spawn(move || match recommendations::channel_icon(&url) {
+            Ok((kind, bytes)) => {
+                let response = Response::from_data(bytes.to_vec())
+                    .with_header(Header::from_bytes("Content-Type",kind).unwrap())
+                    .with_header(Header::from_bytes("Cache-Control","public, max-age=86400").unwrap())
+                    .with_header(Header::from_bytes("X-Content-Type-Options","nosniff").unwrap());
+                let _ = request.respond(response);
+            }
+            Err(error) => respond(request, 404, json(&serde_json::json!({"error":error})), "application/json"),
+        });
+        return;
+    }
+    if method == Method::Get && path == "/history/youtube" {
+        thread::spawn(move || match recommendations::youtube_history() {
+            Ok(result) => respond(request, 200, json(&result), "application/json"),
+            Err(error) => respond(request, 502, json(&serde_json::json!({"error":error})), "application/json"),
+        });
+        return;
+    }
+    if method == Method::Get && path.starts_with("/subscriptions/") {
+        let parts = path.trim_start_matches("/subscriptions/").split('/').collect::<Vec<_>>();
+        if !matches!(parts.as_slice(), ["youtube" | "twitch"] | ["youtube" | "twitch", _]) {
+            respond(request, 404, "{\"error\":\"Unknown subscription route\"}".into(), "application/json");
+            return;
+        }
+        let provider = parts[0].to_owned();
+        let channel = parts.get(1).map(|id| id.to_string());
+        thread::spawn(move || match recommendations::subscriptions(&provider, channel.as_deref()) {
+            Ok(result) => respond(request, 200, json(&result), "application/json"),
+            Err(error) => respond(request, 502, json(&serde_json::json!({"error":error})), "application/json"),
+        });
+        return;
+    }
+    if path == "/settings/recommendations/home" && matches!(method, Method::Get | Method::Post) {
+        let result = (|| -> Result<u64, String> {
+            let mut config = load_user_config()?;
+            if method == Method::Post {
+                let mut body = String::new();
+                request.as_reader().take(1025).read_to_string(&mut body).map_err(|_| "Invalid settings body")?;
+                let value: serde_json::Value = serde_json::from_str(&body).map_err(|_| "Invalid settings body")?;
+                let minutes = value["refresh_minutes"].as_u64().filter(|n| *n <= 1440)
+                    .ok_or("Set refresh_minutes to 0 (Off) or 1–1440")?;
+                if body.len() > 1024 { return Err("Invalid settings body".into()); }
+                config.youtube_home_refresh_minutes = minutes;
+                let path = user_config_path()?;
+                if let Some(dir) = path.parent() { std::fs::create_dir_all(dir).map_err(|e| e.to_string())?; }
+                std::fs::write(path, serde_json::to_vec_pretty(&config).map_err(|e| e.to_string())?)
+                    .map_err(|e| format!("Could not save Home refresh settings: {e}"))?;
+                recommendations::set_home_interval(minutes);
+            }
+            Ok(config.youtube_home_refresh_minutes.min(1440))
+        })();
+        match result {
+            Ok(minutes) => respond(request, 200, json(&serde_json::json!({"refresh_minutes":minutes})), "application/json"),
+            Err(error) => respond(request, 400, json(&serde_json::json!({"error":error})), "application/json"),
+        }
+        return;
+    }
+    if method == Method::Post && path == "/recommendations/home/short" {
+        match recommendations::refresh_short_home() {
+            Ok(()) => respond(request, 202, "{\"refreshing\":true}".into(), "application/json"),
+            Err(error) => respond(request, 503, json(&serde_json::json!({"error":error})), "application/json"),
+        }
+        return;
+    }
+    if method == Method::Post && path == "/recommendations/home/extend" {
+        match recommendations::extend_home() {
+            Ok(()) => respond(request, 202, "{\"refreshing\":true}".into(), "application/json"),
+            Err(error) => respond(request, 409, json(&serde_json::json!({"error":error})), "application/json"),
+        }
+        return;
+    }
+    if method == Method::Post && path == "/recommendations/home/long" {
+        match recommendations::refresh_home() {
+            Ok(()) => respond(request, 202, "{\"refreshing\":true}".into(), "application/json"),
+            Err(error) => respond(request, 409, json(&serde_json::json!({"error":error})), "application/json"),
+        }
+        return;
+    }
+    if method == Method::Get && matches!(path.as_str(), "/recommendations/home" | "/recommendations/home/short" | "/recommendations/home/long") {
+        let mut snapshot = None;
+        let mut offset = 0;
+        if let Some(query) = request.url().split_once('?').map(|(_, query)| query) {
+            for part in query.split('&') {
+                match part.split_once('=') {
+                    Some(("snapshot", value)) => snapshot = value.parse::<u64>().ok(),
+                    Some(("offset", value)) => offset = value.parse::<usize>().unwrap_or(0),
+                    _ => {}
+                }
+            }
+        }
+        let limit = match path.as_str() {
+            "/recommendations/home/short" => recommendations::SHORT_PAGE_SIZE,
+            "/recommendations/home/long" => recommendations::LONG_LIMIT,
+            _ => 20,
+        };
+        thread::spawn(move || match recommendations::home_page(snapshot, offset, limit) {
+            Ok(result) => respond(request, 200, json(&result), "application/json"),
+            Err((status, error)) => respond(request, status, json(&serde_json::json!({"error":error})), "application/json"),
+        });
+        return;
+    }
     if method == Method::Get && path == "/recommendations" {
         let Some(seed) = state.current.as_ref().and_then(|item| recommendations::video_id(&item.url)) else {
             respond(request, 409, json(&serde_json::json!({"error":"No current YouTube video"})), "application/json");
@@ -4487,18 +4640,27 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         });
         return;
     }
-    if method == Method::Post && path == "/settings/recommendations/import" {
+    if method == Method::Post && matches!(path.as_str(), "/settings/recommendations/import" | "/settings/recommendations/import/twitch") {
         if !request.remote_addr().is_some_and(|addr| addr.ip().is_loopback()) {
             respond(request, 403, json(&serde_json::json!({"error":"Import must be requested from the MediaBridge host"})), "application/json");
             return;
         }
-        thread::spawn(move || match recommendations::import_librewolf() {
+        let import = if path.ends_with("/twitch") { recommendations::import_twitch_librewolf } else { recommendations::import_librewolf };
+        thread::spawn(move || match import() {
             Ok(()) => respond(request, 200, json(&serde_json::json!({"ok":true})), "application/json"),
             Err(error) => respond(request, 409, json(&serde_json::json!({"error":error})), "application/json"),
         });
         return;
     }
-    if method == Method::Get && (path == "/" || path == "/index.html") {
+    if method == Method::Get && path == "/dashboard-view.js" {
+        respond(request, 200, include_str!("web/dashboard-view.js").into(), "text/javascript; charset=utf-8");
+        return;
+    }
+    if method == Method::Get && path == "/dashboard-personal.css" {
+        respond(request, 200, include_str!("web/dashboard-personal.css").into(), "text/css; charset=utf-8");
+        return;
+    }
+    if method == Method::Get && matches!(path.as_str(), "/" | "/index.html" | "/legacy-dashboard") {
         respond(request, 200, include_str!("web/index.html").to_string(), "text/html; charset=utf-8"); return;
     }
     if method == Method::Get && matches!(path.as_str(),"/icon.png"|"/favicon.ico") {
@@ -5204,6 +5366,37 @@ fn handle(mut request: Request, cfg: &Config, state: &mut State) {
         respond(request, 200, json(&status), "application/json");
         return;
     }
+    if method == Method::Post && path == "/sunshine/check" {
+        let mut body = String::new();
+        let parsed = request.as_reader().take(4097).read_to_string(&mut body).ok()
+            .filter(|_| body.len() <= 4096)
+            .and_then(|_| serde_json::from_str::<MirrorRequest>(&body).ok());
+        let Some(parsed) = parsed else {
+            respond(request, 400, "{\"error\":\"invalid Sunshine request\"}".into(), "application/json");
+            return;
+        };
+        let host = parsed.host.trim();
+        if host.is_empty() || host.starts_with('-') || host.len() > 253 || host.chars().any(char::is_control) {
+            respond(request, 400, "{\"error\":\"enter a valid Sunshine host name or IP address\"}".into(), "application/json");
+            return;
+        }
+        let mut command = moonlight_command(cfg);
+        command.args(["list", host]).env("LANG", "C").env("LC_ALL", "C").stdin(Stdio::null());
+        thread::spawn(move || {
+            let result = run_cancellable_command(command, &AtomicBool::new(false));
+            let response = match result {
+                Ok(output) if output.status.success() => Some(true),
+                Ok(output) if String::from_utf8_lossy(&output.stderr)
+                    .contains("has not been paired. Please open Moonlight to pair before retrieving games list.") => Some(false),
+                _ => None,
+            };
+            match response {
+                Some(paired) => respond(request, 200, json(&serde_json::json!({"paired":paired})), "application/json"),
+                None => respond(request, 502, "{\"error\":\"Moonlight could not check pairing. Verify that Sunshine is reachable.\"}".into(), "application/json"),
+            }
+        });
+        return;
+    }
     if method == Method::Post && path == "/sunshine/pair" {
         let mut body = String::new();
         if request.as_reader().read_to_string(&mut body).is_err() { respond(request, 400, "{\"error\":\"invalid body\"}".into(), "application/json"); return; }
@@ -5452,7 +5645,9 @@ fn run_server(cfg: Config, shutdown: Option<Arc<AtomicBool>>) -> Result<Option<S
     state.metadata_rx = Some(metadata_rx);
     state.autoplay_tx = Some(autoplay_tx);
     state.autoplay_rx = Some(autoplay_rx);
+    recommendations::set_home_interval(load_user_config().map(|cfg| cfg.youtube_home_refresh_minutes.min(1440)).unwrap_or(30));
     while !shutdown.as_ref().is_some_and(|flag| flag.load(Ordering::Acquire)) {
+        recommendations::tick_home();
         advance(&mut state, &cfg);
         poll_youtube_receiver(&mut state, &cfg);
         if let Some(request) = server.recv_timeout(Duration::from_millis(200)).unwrap_or(None) { handle(request, &cfg, &mut state); }

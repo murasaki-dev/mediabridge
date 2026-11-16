@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Local Fedora prototype: build the app and a matching private runtime.
+# Build the app and its Fedora runtime from an x86_64 Linux host.
 set -euo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 APP_ID=io.github.murasaki_dev.MediaBridge
@@ -13,29 +13,44 @@ for arg in "$@"; do
     --help|-h)
       echo 'Usage: bash build-flatpak.sh [--install]'
       echo 'Requires Linux x86_64, rootless Podman, Flatpak, tar and Python 3.'
-      echo 'Builds local app/runtime bundles in dist/flatpak. No publication or host package installation.'
+      echo 'Arch prerequisites: sudo pacman -Syu --needed podman fuse-overlayfs flatpak python tar'
+      echo 'Fedora prerequisites: sudo dnf install podman flatpak python3 tar'
+      echo 'Builds local app/runtime bundles in dist/flatpak. Use --install to install them on this host.'
       exit 0 ;;
     *) echo "Unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
 [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] || {
-  echo 'Build on x86_64 Linux (Fedora recommended), not Windows.' >&2; exit 1;
+  echo 'Build on x86_64 Linux. Arch and Fedora can both host the Fedora build container.' >&2; exit 1;
 }
 [[ "$EUID" != 0 ]] || { echo 'Run as your normal desktop user, not root.' >&2; exit 1; }
 for tool in podman flatpak tar python3; do
   command -v "$tool" >/dev/null || {
-    echo "Missing $tool. On Fedora: sudo dnf install podman flatpak python3 tar" >&2; exit 1;
+    echo "Missing $tool. Run bash build-flatpak.sh --help for prerequisite commands." >&2; exit 1;
   }
 done
-podman info >/dev/null
-OUT="$ROOT_DIR/dist/flatpak"
+podman_cmd=(podman)
+if [[ "${MEDIABRIDGE_FLATPAK_STORAGE:-}" == vfs ]]; then
+  storage="${XDG_DATA_HOME:-$HOME/.local/share}/mediabridge-flatpak-podman"
+  podman_cmd+=(--storage-driver vfs --root "$storage/storage" --runroot "${XDG_RUNTIME_DIR:-$storage}/mediabridge-flatpak-podman")
+fi
+if ! podman_error="$("${podman_cmd[@]}" info 2>&1 >/dev/null)"; then
+  printf '%s\n' "$podman_error" >&2
+  if [[ "$podman_error" == *overlay* && "$podman_error" == *storage* ]]; then
+    echo 'On Arch, install fuse-overlayfs or retry with MEDIABRIDGE_FLATPAK_STORAGE=vfs for isolated build storage.' >&2
+  else
+    echo 'Rootless Podman could not start. Run podman info as your normal user to diagnose it.' >&2
+  fi
+  exit 1
+fi
+OUT="${MEDIABRIDGE_FLATPAK_OUTPUT:-$ROOT_DIR/dist/flatpak}"
 mkdir -p "$OUT"
 exec > >(tee "$OUT/build.log") 2>&1
 WORK="$(mktemp -d "$OUT/work.XXXXXXXX")"
 CONTAINER=""
 cleanup() {
   local build_status=$?
-  if [[ -n "$CONTAINER" ]]; then podman rm --force "$CONTAINER" >/dev/null 2>&1 || true; fi
+  if [[ -n "$CONTAINER" ]]; then "${podman_cmd[@]}" rm --force "$CONTAINER" >/dev/null 2>&1 || true; fi
   # WORK is always a newly created child of our output directory.
   chmod -R u+rwX -- "$WORK" 2>/dev/null || true
   if ! rm -rf -- "$WORK"; then
@@ -52,20 +67,21 @@ if [[ -n "${MEDIABRIDGE_FLATPAK_NETWORK:-}" ]]; then
   network_args=(--network "$MEDIABRIDGE_FLATPAK_NETWORK")
   echo "Build container network: $MEDIABRIDGE_FLATPAK_NETWORK (installed app permissions are unchanged)"
 fi
-CONTAINER="$(podman run --detach --pull=missing "${network_args[@]}" "$IMAGE" sleep infinity)"
-podman image inspect "$IMAGE" --format '{{.Id}} {{.Digest}}' > "$WORK/image.txt"
+CONTAINER="$("${podman_cmd[@]}" run --detach --pull=missing "${network_args[@]}" "$IMAGE" sleep infinity)"
+"${podman_cmd[@]}" image inspect "$IMAGE" --format '{{.Id}} {{.Digest}}' > "$WORK/image.txt"
 # Copy only source, never local settings, credentials, browser profiles or build outputs.
 tar -C "$ROOT_DIR" -cf "$WORK/source.tar" \
-  Cargo.toml Cargo.lock main.rs recommendations.rs tests.rs dial.rs youtube_receiver.rs steam.rs steam_linux.rs steam_linux.py steam_windows.rs \
-  web assets packaging/flatpak
-podman cp "$WORK/source.tar" "$CONTAINER:/tmp/source.tar"
-podman exec "$CONTAINER" bash -c 'mkdir /src; tar -xf /tmp/source.tar -C /src; rm /tmp/source.tar; bash /src/packaging/flatpak/build-runtime.sh'
+  Cargo.toml Cargo.lock build.rs dashboard.rs main.rs recommendations.rs tests.rs dial.rs youtube_receiver.rs steam.rs steam_linux.rs steam_linux.py steam_windows.rs \
+  web assets packaging/flatpak \
+  dashboard-preview/svelte/{package.json,package-lock.json,svelte.config.js,vite.config.ts,tsconfig.json,src,static,obscura}
+"${podman_cmd[@]}" cp "$WORK/source.tar" "$CONTAINER:/tmp/source.tar"
+"${podman_cmd[@]}" exec "$CONTAINER" bash -c 'mkdir /src; tar -xf /tmp/source.tar -C /src; rm /tmp/source.tar; bash /src/packaging/flatpak/build-runtime.sh'
 # build-export checks for files/ even when --runtime exports the usr/ tree.
 mkdir -p "$WORK/app/files" "$WORK/runtime/files" "$WORK/runtime/usr/etc"
 copy_container_tree() {
   # Do not import container/subordinate UIDs or read-only package directory modes.
   # All extracted files belong to the desktop user, without requiring sudo.
-  podman exec "$CONTAINER" tar -C "$1" -cf - . |
+  "${podman_cmd[@]}" exec "$CONTAINER" tar -C "$1" -cf - . |
     tar --no-same-owner --no-same-permissions -xf - -C "$2"
   chmod -R u+rwX -- "$2"
 }
